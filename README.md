@@ -1,2 +1,4 @@
-# hapstimator
-Simulated Annealing and EM alg version of estimating haplotypes
+# Haplmate
+
+Simulated Annealing and Expectation-Maximization algorithm version of estimating haplotypes
+

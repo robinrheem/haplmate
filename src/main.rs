@@ -59,32 +59,38 @@ struct Args {
 ///
 /// A vector of unaligned sample filenames, or an error if file I/O or parsing fails.
 fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
-    let mut unaligned: Vec<&'a str> = Vec::new();
     let mut aligned_length: Option<usize> = None;
-    for sample in samples {
-        let mut reader = Reader::from_path(sample)?;
-        while let Some(record) = reader.next() {
-            let record = record?;
-            let sequence_length = record.seq().len();
-            if aligned_length.is_none() {
-                aligned_length = Some(sequence_length);
+    Ok(samples
+        .iter()
+        .filter(|sample| {
+            let reader = Reader::from_path(sample);
+            if reader.is_err() {
+                eprintln!("Failed to open sample file: {}", sample);
+                return true; // Mark file as unaligned due to error
             }
-            if Some(sequence_length) != aligned_length {
-                unaligned.push(sample.as_str());
-                break;
-            }
-        }
-    }
-    Ok(unaligned)
+            let mut reader = reader.unwrap();
+            reader
+                .records()
+                .filter_map(|result| result.ok())
+                .any(|record| {
+                    let sequence_length = record.seq().len();
+                    if aligned_length.is_none() {
+                        aligned_length = Some(sequence_length);
+                    }
+                    Some(sequence_length) != aligned_length
+                })
+        })
+        .map(|sample| sample.as_str())
+        .collect())
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;
     if !unaligned.is_empty() {
-        for sample in &unaligned {
-            eprintln!("Sample {} is not aligned", sample);
-        }
+        unaligned
+            .iter()
+            .for_each(|sample| eprintln!("Sample {} is not aligned", sample));
         exit(1);
     }
     dbg!(args);

@@ -1,3 +1,7 @@
+use anyhow::Result;
+use seq_io::fasta::{Reader, Record};
+use std::process::exit;
+
 use clap::Parser;
 
 /// Estimating haplotypes with Simulated Annealing and Expectation-Maximization
@@ -45,9 +49,44 @@ struct Args {
     em_cdelta: f64,
 }
 
-/// TODO: Automatically read and get numbers of:
-/// reads, samples(number of files), length of aligned reads(sequence length)
-fn main() {
+/// Check whether all reads in samples are aligned
+///
+/// # Arguments
+///
+/// * `samples` - A list of sample filenames
+///
+/// # Returns
+///
+/// A vector of unaligned sample filenames, or an error if file I/O or parsing fails.
+fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
+    let mut unaligned: Vec<&'a str> = Vec::new();
+    let mut aligned_length: Option<usize> = None;
+    for sample in samples {
+        let mut reader = Reader::from_path(sample)?;
+        while let Some(record) = reader.next() {
+            let record = record?;
+            let sequence_length = record.seq().len();
+            if aligned_length.is_none() {
+                aligned_length = Some(sequence_length);
+            }
+            if Some(sequence_length) != aligned_length {
+                unaligned.push(sample.as_str());
+                break;
+            }
+        }
+    }
+    Ok(unaligned)
+}
+
+fn main() -> Result<()> {
     let args = Args::parse();
+    let unaligned = unaligned_samples(&args.files)?;
+    if !unaligned.is_empty() {
+        for sample in &unaligned {
+            eprintln!("Sample {} is not aligned", sample);
+        }
+        exit(1);
+    }
     dbg!(args);
+    Ok(())
 }

@@ -65,7 +65,7 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
         .filter(|sample| {
             let reader = Reader::from_path(sample);
             if reader.is_err() {
-                eprintln!("Failed to open sample file: {}", sample);
+                eprintln!("Failed to open sample file: {sample}");
                 return true; // Mark file as unaligned due to error
             }
             let mut reader = reader.unwrap();
@@ -90,7 +90,7 @@ fn main() -> Result<()> {
     if !unaligned.is_empty() {
         unaligned
             .iter()
-            .for_each(|sample| eprintln!("Sample {} is not aligned", sample));
+            .for_each(|sample| eprintln!("Sample {sample} is not aligned"));
         exit(1);
     }
     dbg!(args);

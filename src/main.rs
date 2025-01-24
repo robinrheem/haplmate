@@ -49,6 +49,17 @@ struct Args {
     em_cdelta: f64,
 }
 
+struct Read {
+    id: String,
+    sequence: Vec<u8>,
+    sample: String,
+}
+
+struct Haplotype {
+    sequence: Vec<u8>,
+    sample: String,
+}
+
 /// Check whether all reads in samples are aligned
 ///
 /// # Arguments
@@ -84,6 +95,47 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
         .collect())
 }
 
+/// Remove all invariants from all reads
+///
+/// # Arguments
+///
+/// * `reads` - A list of reads
+///
+/// # Returns
+///
+/// A list of reads that have removed invariants
+fn remove_invariants(reads: &Vec<Read>) -> Vec<Read> {
+    todo!()
+}
+
+/// Read all reads from the sample
+///
+/// # Arguments
+///
+/// * `samples` - A list of sample filenames
+///
+/// # Returns
+///
+/// List of reads with sample information
+fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
+    let mut reads = Vec::new();
+    samples.iter().for_each(|sample| {
+        let reader = Reader::from_path(sample);
+        reader
+            .unwrap()
+            .records()
+            .filter_map(|result| result.ok())
+            .for_each(|record| {
+                reads.push(Read {
+                    id: record.id().unwrap().to_string(),
+                    sequence: record.seq().to_vec(),
+                    sample: sample.to_string(),
+                });
+            });
+    });
+    reads
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;
@@ -93,6 +145,9 @@ fn main() -> Result<()> {
             .for_each(|sample| eprintln!("Sample {sample} is not aligned"));
         exit(1);
     }
-    dbg!(args);
+    let args = dbg!(args);
+    let reads = extract_reads(&args.files);
+    let variant_only_reads = remove_invariants(&reads);
+
     Ok(())
 }

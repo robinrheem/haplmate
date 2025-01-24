@@ -158,6 +158,20 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
     reads
 }
 
+/// Propose initial haplotype set
+/// All combinations that can happen from read information
+///
+/// # Arguments
+///
+/// * `reads` - A list of reads from samples
+///
+/// # Returns
+///
+/// List of haplotypes(full sequences)
+fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
+    todo!()
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;
@@ -170,7 +184,7 @@ fn main() -> Result<()> {
     let args = dbg!(args);
     let reads = extract_reads(&args.files);
     let variant_only_reads = remove_invariants(&reads);
-    dbg!(variant_only_reads);
+    let initial_haplotypes = dbg!(init_haplotypes(&reads));
     Ok(())
 }
 

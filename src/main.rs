@@ -1,5 +1,6 @@
 use anyhow::Result;
 use seq_io::fasta::{Reader, Record};
+use std::collections::{HashSet, VecDeque};
 use std::process::exit;
 
 use clap::Parser;
@@ -169,7 +170,41 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
 ///
 /// List of haplotypes(full sequences)
 fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
-    todo!()
+    let mut haplotype_set: HashSet<(Vec<u8>, String)> = HashSet::new();
+    for read in reads {
+        // Queue to store intermediate sequences during expansion
+        let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
+        queue.push_back(vec![]); // Start with an empty sequence
+
+        // Expand blanks iteratively
+        for &nucleotide in &read.sequence {
+            let mut level_size = queue.len();
+            while level_size > 0 {
+                level_size -= 1;
+                let mut current = queue.pop_front().unwrap();
+                if nucleotide == b'-' {
+                    // For blanks, enqueue all possible nucleotides
+                    for &fill in b"ACGT" {
+                        let mut next = current.clone();
+                        next.push(fill);
+                        queue.push_back(next);
+                    }
+                } else {
+                    // For normal nucleotides, continue the sequence
+                    current.push(nucleotide);
+                    queue.push_back(current);
+                }
+            }
+        }
+        // Add all fully expanded sequences with the sample to the haplotype set
+        for sequence in queue {
+            haplotype_set.insert((sequence, read.sample.clone()));
+        }
+    }
+    haplotype_set
+        .into_iter()
+        .map(|(sequence, sample)| Haplotype { sequence, sample })
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -254,6 +289,7 @@ mod tests {
     fn test_with_gaps() {
         let reads = create_test_reads(vec!["A-CTG", "A-CTG", "A-CTG"], "sample1");
         let result = remove_invariants(&reads);
+        // FIXME: If all are blank, then there's no information, which we should give an error / panic
 
         for (i, read) in result.iter().enumerate() {
             assert_eq!(
@@ -273,6 +309,21 @@ mod tests {
         assert_eq!(result[0].sequence, b"-C",);
         assert_eq!(result[1].sequence, b"-C",);
         assert_eq!(result[2].sequence, b"-G",);
+        // FIXME: It should return C C G
+        // You can remove the column in this case
+        // AA
+        // AC
+        // AG
+        // -A
+        // -C
+        // -G
+        //
+        // AA
+        // TC
+        // AG
+        // -A
+        // -C
+        // AG
     }
 
     #[test]
@@ -338,6 +389,7 @@ mod tests {
         ];
         let result = remove_invariants(&reads);
 
+        // FIXME: We don't need the id of the read
         assert_eq!(result[0].id, "custom_id_1",);
         assert_eq!(result[0].sample, "sample_A",);
         assert_eq!(result[1].id, "custom_id_2",);
@@ -357,6 +409,7 @@ mod tests {
 
     #[test]
     fn test_all_gaps() {
+        // FIXME: If all gaps, then don't go through! No information
         let reads = create_test_reads(vec!["----", "----", "----"], "sample1");
         let result = remove_invariants(&reads);
 
@@ -368,5 +421,176 @@ mod tests {
                 i + 1
             );
         }
+    }
+
+    #[test]
+    fn test_single_read_no_blanks() {
+        // FIXME: If there's no C(for example) in the column, then you don't need to put that in as a possability
+        let reads = create_test_reads(vec!["ACGT"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        assert_eq!(haplotypes.len(), 1);
+        assert_eq!(haplotypes[0].sequence, b"ACGT");
+        assert_eq!(haplotypes[0].sample, "sample1");
+    }
+
+    #[test]
+    fn test_single_read_with_blanks() {
+        let reads = create_test_reads(vec!["A-C"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected: HashSet<Vec<u8>> = HashSet::from([
+            b"AAC".to_vec(),
+            b"ACC".to_vec(),
+            b"AGC".to_vec(),
+            b"ATC".to_vec(),
+        ]);
+
+        assert_eq!(haplotypes.len(), expected.len());
+        for haplotype in haplotypes {
+            assert!(expected.contains(&haplotype.sequence));
+            assert_eq!(haplotype.sample, "sample1");
+        }
+    }
+
+    #[test]
+    fn test_multiple_reads_no_blanks() {
+        let reads = create_test_reads(vec!["ACGT", "TGCA"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected: HashSet<Vec<u8>> = HashSet::from([b"ACGT".to_vec(), b"TGCA".to_vec()]);
+
+        assert_eq!(haplotypes.len(), expected.len());
+        for haplotype in haplotypes {
+            assert!(expected.contains(&haplotype.sequence));
+            assert_eq!(haplotype.sample, "sample1");
+        }
+    }
+
+    #[test]
+    fn test_multiple_reads_with_blanks() {
+        let reads = create_test_reads(vec!["A-C", "T-G"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected: HashSet<Vec<u8>> = HashSet::from([
+            b"AAC".to_vec(),
+            b"ACC".to_vec(),
+            b"AGC".to_vec(),
+            b"ATC".to_vec(),
+            b"TGG".to_vec(),
+            b"TAG".to_vec(),
+            b"TCG".to_vec(),
+            b"TTG".to_vec(),
+        ]);
+
+        assert_eq!(haplotypes.len(), expected.len());
+        for haplotype in haplotypes {
+            assert!(expected.contains(&haplotype.sequence));
+            assert_eq!(haplotype.sample, "sample1");
+        }
+    }
+
+    #[test]
+    fn test_deduplication_of_haplotypes() {
+        let reads = create_test_reads(vec!["A-C", "A-C"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected: HashSet<Vec<u8>> = HashSet::from([
+            b"AAC".to_vec(),
+            b"ACC".to_vec(),
+            b"AGC".to_vec(),
+            b"ATC".to_vec(),
+        ]);
+
+        assert_eq!(haplotypes.len(), expected.len());
+        for haplotype in haplotypes {
+            assert!(expected.contains(&haplotype.sequence));
+            assert_eq!(haplotype.sample, "sample1");
+        }
+    }
+
+    #[test]
+    fn test_reads_from_different_samples() {
+        let reads = vec![
+            Read {
+                id: "read1".to_string(),
+                sequence: b"A-C".to_vec(),
+                sample: "sample1".to_string(),
+            },
+            Read {
+                id: "read2".to_string(),
+                sequence: b"T-G".to_vec(),
+                sample: "sample2".to_string(),
+            },
+        ];
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected_sample1: HashSet<Vec<u8>> = HashSet::from([
+            b"AAC".to_vec(),
+            b"ACC".to_vec(),
+            b"AGC".to_vec(),
+            b"ATC".to_vec(),
+        ]);
+        let expected_sample2: HashSet<Vec<u8>> = HashSet::from([
+            b"TGG".to_vec(),
+            b"TAG".to_vec(),
+            b"TCG".to_vec(),
+            b"TTG".to_vec(),
+        ]);
+
+        let mut haplotype_sample1 = vec![];
+        let mut haplotype_sample2 = vec![];
+
+        for haplotype in haplotypes {
+            if haplotype.sample == "sample1" {
+                haplotype_sample1.push(haplotype.sequence);
+            } else if haplotype.sample == "sample2" {
+                haplotype_sample2.push(haplotype.sequence);
+            }
+        }
+
+        assert_eq!(haplotype_sample1.len(), expected_sample1.len());
+        assert_eq!(haplotype_sample2.len(), expected_sample2.len());
+
+        for seq in haplotype_sample1 {
+            assert!(expected_sample1.contains(&seq));
+        }
+        for seq in haplotype_sample2 {
+            assert!(expected_sample2.contains(&seq));
+        }
+    }
+
+    #[test]
+    fn test_large_sequences_with_no_blanks() {
+        let long_seq = "A".repeat(1000);
+        let reads = create_test_reads(vec![&long_seq], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        assert_eq!(haplotypes.len(), 1);
+        assert_eq!(haplotypes[0].sequence.len(), 1000);
+        assert_eq!(haplotypes[0].sequence, long_seq.as_bytes());
+        assert_eq!(haplotypes[0].sample, "sample1");
+    }
+
+    #[test]
+    #[ignore]
+    fn test_large_sequences_with_blanks() {
+        let long_seq_with_blanks = format!("A{}C", "-".repeat(998));
+        let reads = create_test_reads(vec![&long_seq_with_blanks], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        let expected_count = 4_usize.pow(998); // 998 blanks => 4^998 combinations
+        assert_eq!(haplotypes.len(), expected_count);
+    }
+
+    #[test]
+    fn test_empty_reads() {
+        let reads = create_test_reads(vec![], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        assert!(
+            haplotypes.is_empty(),
+            "Haplotypes should be empty for empty reads"
+        );
     }
 }

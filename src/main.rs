@@ -111,9 +111,10 @@ fn remove_invariants(reads: &Vec<Read>) -> Vec<Read> {
     let mut filtered_sequences = vec![Vec::new(); reads.len()];
     for i in 0..reads.first().unwrap().sequence.len() {
         let column: Vec<u8> = reads.iter().map(|read| read.sequence[i]).collect();
-        let is_invariant: bool = column.iter().all(|&c| c == column[0]);
-        let is_all_blank: bool = column.iter().all(|&c| c == b'-');
-        if is_invariant && !is_all_blank {
+        let unique_nucleotides: HashSet<u8> =
+            column.iter().filter(|&&c| c != b'-').copied().collect();
+        // Skip if only one type of nucleotide (or all gaps)
+        if unique_nucleotides.len() <= 1 {
             continue;
         }
         for (j, c) in column.into_iter().enumerate() {
@@ -219,7 +220,7 @@ fn main() -> Result<()> {
     let args = dbg!(args);
     let reads = extract_reads(&args.files);
     let variant_only_reads = remove_invariants(&reads);
-    let initial_haplotypes = dbg!(init_haplotypes(&reads));
+    let _initial_haplotypes = dbg!(init_haplotypes(&variant_only_reads));
     Ok(())
 }
 
@@ -289,14 +290,13 @@ mod tests {
     fn test_with_gaps() {
         let reads = create_test_reads(vec!["A-CTG", "A-CTG", "A-CTG"], "sample1");
         let result = remove_invariants(&reads);
-        // FIXME: If all are blank, then there's no information, which we should give an error / panic
 
         for (i, read) in result.iter().enumerate() {
-            assert_eq!(
-                read.sequence,
-                b"-",
-                "Read {} should only contain the gap character",
-                i + 1
+            assert!(
+                read.sequence.is_empty(),
+                "Sequence for read {} should be empty, but got: {:?}",
+                i + 1,
+                String::from_utf8_lossy(&read.sequence)
             );
         }
     }
@@ -306,24 +306,19 @@ mod tests {
         let reads = create_test_reads(vec!["A-CTA", "A-CTA", "A-GTA"], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result[0].sequence, b"-C",);
-        assert_eq!(result[1].sequence, b"-C",);
-        assert_eq!(result[2].sequence, b"-G",);
-        // FIXME: It should return C C G
-        // You can remove the column in this case
-        // AA
-        // AC
-        // AG
-        // -A
-        // -C
-        // -G
-        //
-        // AA
-        // TC
-        // AG
-        // -A
-        // -C
-        // AG
+        assert_eq!(result[0].sequence, b"C",);
+        assert_eq!(result[1].sequence, b"C",);
+        assert_eq!(result[2].sequence, b"G",);
+    }
+
+    #[test]
+    fn test_mixed_gaps_with_single_invariants() {
+        let reads = create_test_reads(vec!["-ACTA", "A-CTA", "A-GTA"], "sample1");
+        let result = remove_invariants(&reads);
+
+        assert_eq!(result[0].sequence, b"C",);
+        assert_eq!(result[1].sequence, b"C",);
+        assert_eq!(result[2].sequence, b"G",);
     }
 
     #[test]
@@ -388,8 +383,6 @@ mod tests {
             },
         ];
         let result = remove_invariants(&reads);
-
-        // FIXME: We don't need the id of the read
         assert_eq!(result[0].id, "custom_id_1",);
         assert_eq!(result[0].sample, "sample_A",);
         assert_eq!(result[1].id, "custom_id_2",);
@@ -409,16 +402,15 @@ mod tests {
 
     #[test]
     fn test_all_gaps() {
-        // FIXME: If all gaps, then don't go through! No information
         let reads = create_test_reads(vec!["----", "----", "----"], "sample1");
         let result = remove_invariants(&reads);
 
         for (i, read) in result.iter().enumerate() {
-            assert_eq!(
-                read.sequence,
-                b"----",
-                "Read {} should contain all gaps",
-                i + 1
+            assert!(
+                read.sequence.is_empty(),
+                "Sequence for read {} should be empty, but got: {:?}",
+                i + 1,
+                String::from_utf8_lossy(&read.sequence)
             );
         }
     }

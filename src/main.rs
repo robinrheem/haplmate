@@ -1,4 +1,7 @@
 use anyhow::Result;
+use argmin::core::{CostFunction, Executor};
+use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
+use rand::prelude::*;
 use seq_io::fasta::{Reader, Record};
 use std::collections::{HashSet, VecDeque};
 use std::process::exit;
@@ -61,6 +64,22 @@ struct Read {
 struct Haplotype {
     sequence: Vec<u8>,
     sample: String,
+}
+
+#[derive(Debug)]
+struct OptimizationParameters {
+    max_mismatches: usize,
+    em_iterations: usize,
+    sa_schedule: f64,
+    lambda1: f64,
+    lambda2: f64,
+    error_rate: f64,
+    sa_min_temperature: f64,
+    sa_max_temperature: f64,
+    sa_iterations: usize,
+    em_interval: usize,
+    sa_reruns: usize,
+    em_cdelta: f64,
 }
 
 /// Check whether all reads in samples are aligned
@@ -208,6 +227,266 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         .collect()
 }
 
+#[derive(Clone)]
+struct HaplotypeObjective {
+    reads: Vec<Read>,
+    error_rate: f64,
+    lambda1: f64,
+    lambda2: f64,
+    max_iterations: usize,
+    convergence_delta: f64,
+}
+
+impl HaplotypeObjective {
+    /// E-step: Calculate posterior probabilities
+    /// M-step: Update haplotype frequencies
+    /// Repeat until convergence or max iterations
+    fn expectation_maximization(&self, current_haplotypes: &Vec<Haplotype>) {
+        let mut frequencies: Vec<f64> =
+            vec![1.0 / current_haplotypes.len() as f64; current_haplotypes.len()];
+        let mut old_frequencies: Vec<f64>;
+
+        for _ in 0..self.max_iterations {
+            old_frequencies = frequencies.clone();
+
+            // E-step: Calculate posterior probabilities
+            let mut responsibilities: Vec<Vec<f64>> =
+                vec![vec![0.0; current_haplotypes.len()]; self.reads.len()];
+            for (i, read) in self.reads.iter().enumerate() {
+                let mut total_prob = 0.0;
+
+                // Calculate probabilities for each haplotype
+                for (j, haplotype) in current_haplotypes.iter().enumerate() {
+                    if read.sample != haplotype.sample {
+                        continue;
+                    }
+                    let mismatches = read
+                        .sequence
+                        .iter()
+                        .zip(&haplotype.sequence)
+                        .filter(|(&r, &h)| r != h && r != b'-')
+                        .count();
+                    let prob = frequencies[j]
+                        * (1.0 - self.error_rate).powi((read.sequence.len() - mismatches) as i32)
+                        * self.error_rate.powi(mismatches as i32);
+                    responsibilities[i][j] = prob;
+                    total_prob += prob;
+                }
+
+                // Normalize probabilities
+                if total_prob > 0.0 {
+                    for prob in responsibilities[i].iter_mut() {
+                        *prob /= total_prob;
+                    }
+                }
+            }
+
+            // M-step: Update frequencies
+            for j in 0..current_haplotypes.len() {
+                frequencies[j] = responsibilities.iter().map(|resp| resp[j]).sum::<f64>()
+                    / self.reads.len() as f64;
+            }
+
+            // Check convergence
+            let max_diff = frequencies
+                .iter()
+                .zip(&old_frequencies)
+                .map(|(new, old)| (new - old).abs())
+                .fold(0.0, f64::max);
+
+            if max_diff < self.convergence_delta {
+                break;
+            }
+        }
+    }
+}
+
+impl CostFunction for HaplotypeObjective {
+    type Param = Vec<Haplotype>;
+    type Output = f64;
+
+    fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
+        let mut total_cost = 0.0;
+
+        // Calculate mismatch cost between reads and haplotypes
+        for read in &self.reads {
+            let mut min_mismatches = usize::MAX;
+            for haplotype in haplotypes {
+                if read.sample != haplotype.sample {
+                    continue;
+                }
+                let mismatches = read
+                    .sequence
+                    .iter()
+                    .zip(&haplotype.sequence)
+                    .filter(|(&r, &h)| r != h && r != b'-')
+                    .count();
+                min_mismatches = min_mismatches.min(mismatches);
+            }
+            total_cost += (min_mismatches as f64) * -self.error_rate.ln();
+        }
+
+        // Add penalty terms
+        let num_haplotypes = haplotypes.len() as f64;
+        total_cost += self.lambda1 * num_haplotypes; // Penalty for number of haplotypes
+
+        // Penalty for diversity between haplotypes
+        let mut diversity_penalty = 0.0;
+        for (i, h1) in haplotypes.iter().enumerate() {
+            for h2 in haplotypes.iter().skip(i + 1) {
+                if h1.sample != h2.sample {
+                    continue;
+                }
+                let differences = h1
+                    .sequence
+                    .iter()
+                    .zip(&h2.sequence)
+                    .filter(|(&a, &b)| a != b && a != b'-' && b != b'-')
+                    .count();
+                diversity_penalty += differences as f64;
+            }
+        }
+        total_cost += self.lambda2 * diversity_penalty;
+
+        Ok(total_cost)
+    }
+}
+
+impl Anneal for HaplotypeObjective {
+    type Param = Vec<Haplotype>;
+    type Output = Vec<Haplotype>;
+    type Float = f64;
+
+    fn anneal(
+        &self,
+        param: &Self::Param,
+        temp: Self::Float,
+    ) -> Result<Self::Output, anyhow::Error> {
+        let mut rng = rand::thread_rng();
+        let mut new_haplotypes = param.clone();
+        let rand_val: f64 = rng.gen();
+
+        // Similar to legacy code's getNewHaplotypes function
+        if new_haplotypes.len() > 1 && rand_val < 0.33 {
+            // Delete a random haplotype
+            let idx_to_remove = rng.gen_range(0..new_haplotypes.len());
+            new_haplotypes.remove(idx_to_remove);
+        } else if new_haplotypes.len() < self.reads.len() && rand_val >= 0.67 {
+            // Add a new haplotype by mutating an existing one
+            let idx_to_copy = rng.gen_range(0..new_haplotypes.len());
+            let mut new_sequence = new_haplotypes[idx_to_copy].sequence.clone();
+            let pos_to_change = rng.gen_range(0..new_sequence.len());
+            let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
+            new_sequence[pos_to_change] = new_nucleotide;
+
+            // Only add if this sequence doesn't already exist
+            if !new_haplotypes.iter().any(|h| h.sequence == new_sequence) {
+                new_haplotypes.push(Haplotype {
+                    sequence: new_sequence,
+                    sample: new_haplotypes[idx_to_copy].sample.clone(),
+                });
+            }
+        } else if new_haplotypes.len() >= 2 && rand_val >= 0.33 && rand_val < 0.67 {
+            // Recombine two random haplotypes
+            let idx1 = rng.gen_range(0..new_haplotypes.len());
+            let mut idx2;
+            loop {
+                idx2 = rng.gen_range(0..new_haplotypes.len());
+                if idx1 != idx2 && new_haplotypes[idx1].sample == new_haplotypes[idx2].sample {
+                    break;
+                }
+            }
+
+            // Create recombined sequence
+            let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
+            let mut recombined = new_haplotypes[idx1].sequence.clone();
+            recombined[crossover_point..]
+                .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
+
+            // Only add if this sequence doesn't already exist
+            if !new_haplotypes.iter().any(|h| h.sequence == recombined) {
+                new_haplotypes.push(Haplotype {
+                    sequence: recombined,
+                    sample: new_haplotypes[idx1].sample.clone(),
+                });
+            }
+        }
+
+        // Scale mutations based on temperature
+        if temp > 0.0 && rng.gen::<f64>() < temp {
+            // Additional random mutation when temperature is high
+            if let Some(idx) = (0..new_haplotypes.len()).choose(&mut rng) {
+                let haplotype = &mut new_haplotypes[idx];
+                let pos = rng.gen_range(0..haplotype.sequence.len());
+                let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
+                haplotype.sequence[pos] = new_nucleotide;
+            }
+        }
+
+        Ok(new_haplotypes)
+    }
+}
+
+/// Propose most likely haplotypes with
+/// simulated annealing and expectation-maximization
+///
+/// # Arguments
+///
+/// * `reads` - A list of reads from samples
+/// * `haplotypes` - A list of initial haplotypes
+///
+/// # Returns
+///
+/// List of newly proposed haplotypes
+fn propose_haplotypes(
+    reads: &Vec<Read>,
+    initial_haplotypes: &Vec<Haplotype>,
+    optimization_parameters: OptimizationParameters,
+) -> Vec<Haplotype> {
+    let objective_function = HaplotypeObjective {
+        reads: reads.to_vec(),
+        error_rate: optimization_parameters.error_rate,
+        lambda1: optimization_parameters.lambda1,
+        lambda2: optimization_parameters.lambda2,
+        max_iterations: optimization_parameters.em_iterations,
+        convergence_delta: optimization_parameters.em_cdelta,
+    };
+
+    // Configure simulated annealing solver
+    let solver = SimulatedAnnealing::new(optimization_parameters.sa_max_temperature)
+        .unwrap()
+        .with_temp_func(SATempFunc::TemperatureFast)
+        .with_stall_best(optimization_parameters.sa_iterations as u64);
+
+    // Run the solver multiple times with different initial conditions
+    let mut best_haplotypes = initial_haplotypes.clone();
+    let mut best_objective = f64::INFINITY;
+
+    for i in 0..optimization_parameters.sa_reruns {
+        // Run simulated annealing
+        let result = Executor::new(objective_function.clone(), solver.clone())
+            .configure(|state| state.param(initial_haplotypes.clone()))
+            .run()
+            .unwrap();
+
+        let state = result.state();
+        let best_cost = state.best_cost;
+        if best_cost < best_objective {
+            if let Some(ref param) = state.best_param {
+                best_haplotypes = param.clone();
+                best_objective = best_cost;
+            }
+        }
+
+        // Run EM algorithm periodically
+        if i % optimization_parameters.em_interval == 0 {
+            objective_function.expectation_maximization(&best_haplotypes);
+        }
+    }
+
+    best_haplotypes
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;
@@ -220,7 +499,26 @@ fn main() -> Result<()> {
     let args = dbg!(args);
     let reads = extract_reads(&args.files);
     let variant_only_reads = remove_invariants(&reads);
-    let _initial_haplotypes = dbg!(init_haplotypes(&variant_only_reads));
+    let initial_haplotypes = init_haplotypes(&variant_only_reads);
+    let optimization_parameters = OptimizationParameters {
+        max_mismatches: args.mismatches,
+        em_cdelta: args.em_cdelta,
+        em_interval: args.em_interval,
+        em_iterations: args.em_iterations,
+        error_rate: args.error_rate,
+        lambda1: args.lambda1,
+        lambda2: args.lambda2,
+        sa_iterations: args.sa_iterations,
+        sa_max_temperature: args.sa_max_temperature,
+        sa_min_temperature: args.sa_min_temperature,
+        sa_reruns: args.sa_reruns,
+        sa_schedule: args.sa_schedule,
+    };
+    let _proposed_haplotypes = dbg!(propose_haplotypes(
+        &reads,
+        &initial_haplotypes,
+        optimization_parameters
+    ));
     Ok(())
 }
 

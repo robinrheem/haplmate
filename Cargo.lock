@@ -322,6 +322,7 @@ dependencies = [
  "clap",
  "predicates",
  "pretty_assertions",
+ "rand",
  "seq_io",
  "tempfile",
 ]

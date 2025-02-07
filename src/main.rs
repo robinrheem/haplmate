@@ -3,6 +3,7 @@ use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
 use rand::prelude::*;
 use seq_io::fasta::{Reader, Record};
+use statrs::distribution::{Binomial, Discrete};
 use std::collections::{HashSet, VecDeque};
 use std::process::exit;
 
@@ -228,80 +229,131 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
 }
 
 #[derive(Clone)]
-struct HaplotypeObjective {
+struct HaplotypeEstimationProblem {
     reads: Vec<Read>,
     error_rate: f64,
     lambda1: f64,
     lambda2: f64,
-    max_iterations: usize,
-    convergence_delta: f64,
+    em_max_mismatches: usize,
+    em_iterations: usize,
+    em_convergence_delta: f64,
+    em_interval: usize,
+    sa_iter: std::cell::Cell<usize>, // Use Cell for interior mutability
 }
 
-impl HaplotypeObjective {
-    /// E-step: Calculate posterior probabilities
-    /// M-step: Update haplotype frequencies
-    /// Repeat until convergence or max iterations
-    fn expectation_maximization(&self, current_haplotypes: &Vec<Haplotype>) {
-        let mut frequencies: Vec<f64> =
-            vec![1.0 / current_haplotypes.len() as f64; current_haplotypes.len()];
-        let mut old_frequencies: Vec<f64>;
-
-        for _ in 0..self.max_iterations {
-            old_frequencies = frequencies.clone();
-
-            // E-step: Calculate posterior probabilities
-            let mut responsibilities: Vec<Vec<f64>> =
-                vec![vec![0.0; current_haplotypes.len()]; self.reads.len()];
-            for (i, read) in self.reads.iter().enumerate() {
-                let mut total_prob = 0.0;
-
-                // Calculate probabilities for each haplotype
-                for (j, haplotype) in current_haplotypes.iter().enumerate() {
-                    if read.sample != haplotype.sample {
-                        continue;
-                    }
-                    let mismatches = read
-                        .sequence
-                        .iter()
-                        .zip(&haplotype.sequence)
-                        .filter(|(&r, &h)| r != h && r != b'-')
-                        .count();
-                    let prob = frequencies[j]
-                        * (1.0 - self.error_rate).powi((read.sequence.len() - mismatches) as i32)
-                        * self.error_rate.powi(mismatches as i32);
-                    responsibilities[i][j] = prob;
-                    total_prob += prob;
-                }
-
-                // Normalize probabilities
-                if total_prob > 0.0 {
-                    for prob in responsibilities[i].iter_mut() {
-                        *prob /= total_prob;
-                    }
-                }
-            }
-
-            // M-step: Update frequencies
-            for j in 0..current_haplotypes.len() {
-                frequencies[j] = responsibilities.iter().map(|resp| resp[j]).sum::<f64>()
-                    / self.reads.len() as f64;
-            }
-
-            // Check convergence
-            let max_diff = frequencies
-                .iter()
-                .zip(&old_frequencies)
-                .map(|(new, old)| (new - old).abs())
-                .fold(0.0, f64::max);
-
-            if max_diff < self.convergence_delta {
-                break;
+impl HaplotypeEstimationProblem {
+    /// Calculates the probability of observing a given number of mismatches in a sequence
+    /// using a binomial distribution model.
+    ///
+    /// # Arguments
+    ///
+    /// * `mismatches` - Number of mismatches observed between a read and haplotype
+    /// * `sequence_length` - Length of the sequence being compared
+    ///
+    /// # Returns
+    ///
+    /// The probability of observing exactly `mismatches` number of mismatches in a sequence
+    /// of length `sequence_length`, given the error rate. Returns 0.0 if mismatches exceed
+    /// the maximum allowed mismatches or if creating the binomial distribution fails.
+    fn mismatch_probability(&self, mismatches: usize, sequence_length: usize) -> f64 {
+        if mismatches > self.em_max_mismatches {
+            return 0.0;
+        }
+        match Binomial::new(self.error_rate, sequence_length as u64) {
+            Ok(binomial) => binomial.pmf(mismatches as u64),
+            Err(_) => {
+                eprintln!("Failed to create binomial distribution");
+                return 0.0;
             }
         }
     }
+
+    /// E-step: Calculate posterior probabilities
+    /// M-step: Update haplotype frequencies
+    /// Repeat until convergence or max iterations
+    fn expectation_maximization(&self, haplotypes: &Vec<Haplotype>) -> Vec<(String, Vec<f64>)> {
+        // Get unique samples
+        let samples: HashSet<String> = self.reads.iter().map(|r| r.sample.clone()).collect();
+
+        let mut all_frequencies = Vec::new();
+
+        for sample in samples {
+            let sample_reads: Vec<&Read> =
+                self.reads.iter().filter(|r| r.sample == sample).collect();
+
+            let sample_haplotypes: Vec<(usize, &Haplotype)> = haplotypes
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| h.sample == sample)
+                .collect();
+
+            if sample_haplotypes.is_empty() {
+                continue;
+            }
+
+            let mut frequencies =
+                vec![1.0 / sample_haplotypes.len() as f64; sample_haplotypes.len()];
+            let mut old_frequencies: Vec<f64>;
+
+            for _ in 0..self.em_iterations {
+                old_frequencies = frequencies.clone();
+
+                // E-step: Calculate posterior probabilities
+                let mut responsibilities =
+                    vec![vec![0.0; sample_haplotypes.len()]; sample_reads.len()];
+                for (i, read) in sample_reads.iter().enumerate() {
+                    let mut total_prob = 0.0;
+
+                    // Calculate probabilities for each haplotype
+                    for (j, (_, haplotype)) in sample_haplotypes.iter().enumerate() {
+                        let mismatches = read
+                            .sequence
+                            .iter()
+                            .zip(&haplotype.sequence)
+                            .filter(|(&r, &h)| r != h && r != b'-')
+                            .count();
+                        let prob = frequencies[j]
+                            * (1.0 - self.error_rate)
+                                .powi((read.sequence.len() - mismatches) as i32)
+                            * self.error_rate.powi(mismatches as i32);
+                        responsibilities[i][j] = prob;
+                        total_prob += prob;
+                    }
+
+                    // Normalize probabilities
+                    if total_prob > 0.0 {
+                        for prob in responsibilities[i].iter_mut() {
+                            *prob /= total_prob;
+                        }
+                    }
+                }
+
+                // M-step: Update frequencies
+                for j in 0..sample_haplotypes.len() {
+                    frequencies[j] = responsibilities.iter().map(|resp| resp[j]).sum::<f64>()
+                        / sample_reads.len() as f64;
+                }
+
+                // Check convergence
+                let max_diff = frequencies
+                    .iter()
+                    .zip(&old_frequencies)
+                    .map(|(new, old)| (new - old).abs())
+                    .fold(0.0, f64::max);
+
+                if max_diff < self.em_convergence_delta {
+                    break;
+                }
+            }
+
+            all_frequencies.push((sample, frequencies));
+        }
+
+        all_frequencies
+    }
 }
 
-impl CostFunction for HaplotypeObjective {
+impl CostFunction for HaplotypeEstimationProblem {
     type Param = Vec<Haplotype>;
     type Output = f64;
 
@@ -310,20 +362,18 @@ impl CostFunction for HaplotypeObjective {
 
         // Calculate mismatch cost between reads and haplotypes
         for read in &self.reads {
-            let mut min_mismatches = usize::MAX;
-            for haplotype in haplotypes {
-                if read.sample != haplotype.sample {
-                    continue;
-                }
+            let mut total_mismatch_probability = 0.0;
+            for haplotype in haplotypes.iter().filter(|h| h.sample == read.sample) {
                 let mismatches = read
                     .sequence
                     .iter()
                     .zip(&haplotype.sequence)
                     .filter(|(&r, &h)| r != h && r != b'-')
                     .count();
-                min_mismatches = min_mismatches.min(mismatches);
+                total_mismatch_probability +=
+                    self.mismatch_probability(mismatches, read.sequence.len());
             }
-            total_cost += (min_mismatches as f64) * -self.error_rate.ln();
+            total_cost -= total_mismatch_probability.ln();
         }
 
         // Add penalty terms
@@ -352,7 +402,7 @@ impl CostFunction for HaplotypeObjective {
     }
 }
 
-impl Anneal for HaplotypeObjective {
+impl Anneal for HaplotypeEstimationProblem {
     type Param = Vec<Haplotype>;
     type Output = Vec<Haplotype>;
     type Float = f64;
@@ -365,6 +415,12 @@ impl Anneal for HaplotypeObjective {
         let mut rng = rand::thread_rng();
         let mut new_haplotypes = param.clone();
         let rand_val: f64 = rng.gen();
+
+        // Run EM algorithm periodically
+        if self.sa_iter.get() % self.em_interval == 0 {
+            let _frequencies = self.expectation_maximization(&new_haplotypes);
+        }
+        self.sa_iter.set(self.sa_iter.get() + 1);
 
         // Similar to legacy code's getNewHaplotypes function
         if new_haplotypes.len() > 1 && rand_val < 0.33 {
@@ -443,44 +499,34 @@ fn propose_haplotypes(
     initial_haplotypes: &Vec<Haplotype>,
     optimization_parameters: OptimizationParameters,
 ) -> Vec<Haplotype> {
-    let objective_function = HaplotypeObjective {
+    let problem = HaplotypeEstimationProblem {
         reads: reads.to_vec(),
         error_rate: optimization_parameters.error_rate,
         lambda1: optimization_parameters.lambda1,
         lambda2: optimization_parameters.lambda2,
-        max_iterations: optimization_parameters.em_iterations,
-        convergence_delta: optimization_parameters.em_cdelta,
+        em_max_mismatches: optimization_parameters.max_mismatches,
+        em_iterations: optimization_parameters.em_iterations,
+        em_convergence_delta: optimization_parameters.em_cdelta,
+        em_interval: optimization_parameters.em_interval,
+        sa_iter: std::cell::Cell::new(0),
     };
-
-    // Configure simulated annealing solver
     let solver = SimulatedAnnealing::new(optimization_parameters.sa_max_temperature)
         .unwrap()
         .with_temp_func(SATempFunc::TemperatureFast)
         .with_stall_best(optimization_parameters.sa_iterations as u64);
-
-    // Run the solver multiple times with different initial conditions
     let mut best_haplotypes = initial_haplotypes.clone();
     let mut best_objective = f64::INFINITY;
-
-    for i in 0..optimization_parameters.sa_reruns {
-        // Run simulated annealing
-        let result = Executor::new(objective_function.clone(), solver.clone())
+    for _ in 0..optimization_parameters.sa_reruns {
+        let result = Executor::new(problem.clone(), solver.clone())
             .configure(|state| state.param(initial_haplotypes.clone()))
             .run()
             .unwrap();
-
-        let state = result.state();
-        let best_cost = state.best_cost;
+        let best_cost = result.state().best_cost;
         if best_cost < best_objective {
-            if let Some(ref param) = state.best_param {
+            if let Some(ref param) = result.state().best_param {
                 best_haplotypes = param.clone();
                 best_objective = best_cost;
             }
-        }
-
-        // Run EM algorithm periodically
-        if i % optimization_parameters.em_interval == 0 {
-            objective_function.expectation_maximization(&best_haplotypes);
         }
     }
 

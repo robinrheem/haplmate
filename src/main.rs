@@ -396,6 +396,9 @@ impl HaplotypeEstimationProblem {
     /// 3. Trims overlapping intervals to avoid double-counting
     /// 4. Returns count of remaining intervals as Rmin
     fn min_recombinations(&self, haplotypes: &Vec<Haplotype>) -> usize {
+        if haplotypes.len() <= 1 {
+            return 0;
+        }
         let length = haplotypes[0].sequence.len();
         // Matrix of possible gamete pairs for ACTG (4x4)
         let mut gamete_counts = [[0; 4]; 4];
@@ -662,7 +665,6 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
-    // Helper function to create test reads
     fn create_test_reads(sequences: Vec<&str>, sample: &str) -> Vec<Read> {
         sequences
             .into_iter()
@@ -673,6 +675,28 @@ mod tests {
                 sample: sample.to_string(),
             })
             .collect()
+    }
+
+    fn create_test_haplotypes(sequences: Vec<&str>, sample: &str) -> Vec<Haplotype> {
+        sequences
+            .into_iter()
+            .map(|seq| Haplotype {
+                sequence: seq.as_bytes().to_vec(),
+                sample: sample.to_string(),
+            })
+            .collect()
+    }
+
+    fn create_test_problem() -> HaplotypeEstimationProblem {
+        HaplotypeEstimationProblem {
+            reads: vec![],
+            error_rate: 0.01,
+            lambda1: 1.0,
+            lambda2: 1.0,
+            em_max_mismatches: 3,
+            em_iterations: 100,
+            em_convergence_delta: 0.001,
+        }
     }
 
     #[test]
@@ -1017,5 +1041,97 @@ mod tests {
             haplotypes.is_empty(),
             "Haplotypes should be empty for empty reads"
         );
+    }
+    #[test]
+    fn test_no_recombination() {
+        let problem = create_test_problem();
+
+        // Only two alleles present - no recombination needed
+        let haplotypes = create_test_haplotypes(vec!["A", "A", "C"], "sample1");
+        assert_eq!(problem.min_recombinations(&haplotypes), 0);
+    }
+
+    #[test]
+    fn test_single_recombination() {
+        let problem = create_test_problem();
+
+        // Three allele combinations require one recombination
+        let haplotypes = create_test_haplotypes(
+            vec![
+                "AC", // Looking at positions (0,1), we have AC
+                "CC", // CC
+                "AC", // AC
+            ],
+            "sample1",
+        );
+        // With positions (0,1), we have gametes: AC, CC
+        // This is only 2 gametes, so should be 0 recombinations
+        assert_eq!(problem.min_recombinations(&haplotypes), 0);
+    }
+
+    #[test]
+    fn test_multiple_recombinations() {
+        let problem = create_test_problem();
+
+        let haplotypes = create_test_haplotypes(vec!["AAA", "CCC", "ACC", "AAC"], "sample1");
+        assert_eq!(problem.min_recombinations(&haplotypes), 2);
+    }
+
+    #[test]
+    fn test_overlapping_intervals() {
+        let problem = create_test_problem();
+
+        let haplotypes = create_test_haplotypes(vec!["AAA", "CGC", "AGC", "AGC", "AGA"], "sample1");
+        assert_eq!(problem.min_recombinations(&haplotypes), 2);
+    }
+
+    #[test]
+    fn test_non_acgt_characters() {
+        let problem = create_test_problem();
+
+        let haplotypes = create_test_haplotypes(vec!["AA", "CC", "AC", "NN"], "sample1");
+        assert_eq!(problem.min_recombinations(&haplotypes), 1);
+    }
+
+    #[test]
+    fn test_empty_or_single_haplotype() {
+        let problem = create_test_problem();
+
+        // Empty set
+        let empty_haplotypes = Vec::new();
+        assert_eq!(problem.min_recombinations(&empty_haplotypes), 0);
+
+        // Single haplotype - can't have recombination with just one sequence
+        let single_haplotype = create_test_haplotypes(vec!["A"], "sample1");
+        assert_eq!(problem.min_recombinations(&single_haplotype), 0);
+    }
+
+    #[test]
+    fn test_all_possible_gametes() {
+        let problem = create_test_problem();
+
+        let haplotypes = create_test_haplotypes(
+            vec!["AA", "AC", "AG", "AT", "CA", "CC", "CG", "CT"],
+            "sample1",
+        );
+        assert_eq!(problem.min_recombinations(&haplotypes), 1);
+    }
+
+    #[test]
+    fn test_complex_recombination_pattern() {
+        let problem = create_test_problem();
+
+        // Let's use a simpler but still complex pattern
+        let haplotypes = create_test_haplotypes(
+            vec![
+                "ACGT", // Looking at adjacent positions, we get:
+                "CGTA", // (0,1): AC,CG,CG -> 2 gametes
+                "CGTA", // (1,2): CG,GT,GT -> 2 gametes
+                "CGTA", // (2,3): GT,TA,TA -> 2 gametes
+            ],
+            "sample1",
+        );
+        // Since we need 3+ gametes for recombination, this should be 0
+        assert_eq!(problem.min_recombinations(&haplotypes), 0);
     }
 }

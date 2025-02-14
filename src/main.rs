@@ -71,11 +71,9 @@ struct Haplotype {
 struct OptimizationParameters {
     max_mismatches: usize,
     em_iterations: usize,
-    sa_schedule: f64,
     lambda1: f64,
     lambda2: f64,
     error_rate: f64,
-    sa_min_temperature: f64,
     sa_max_temperature: f64,
     sa_iterations: usize,
     sa_reruns: usize,
@@ -648,9 +646,7 @@ fn main() -> Result<()> {
         lambda2: args.lambda2,
         sa_iterations: args.sa_iterations,
         sa_max_temperature: args.sa_max_temperature,
-        sa_min_temperature: args.sa_min_temperature,
         sa_reruns: args.sa_reruns,
-        sa_schedule: args.sa_schedule,
     };
     let _proposed_haplotypes = dbg!(propose_haplotypes(
         &reads,

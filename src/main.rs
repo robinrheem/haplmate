@@ -268,6 +268,36 @@ impl HaplotypeEstimationProblem {
     /// E-step: Calculate posterior probabilities
     /// M-step: Update haplotype frequencies
     /// Repeat until convergence or max iterations
+    /// Performs Expectation-Maximization (EM) algorithm to estimate haplotype frequencies within each sample.
+    ///
+    /// # Arguments
+    ///
+    /// * `haplotypes` - Vector of Haplotype objects containing sequences and their sample assignments
+    ///
+    /// # Returns
+    ///
+    /// A vector of tuples containing:
+    /// * Sample ID (String)
+    /// * Vector of frequency estimates for each haplotype in that sample (Vec<f64>)
+    ///
+    /// # Algorithm
+    ///
+    /// For each sample:
+    /// 1. Filters reads and haplotypes belonging to that sample
+    /// 2. Initializes haplotype frequencies uniformly
+    /// 3. Iteratively:
+    ///    - E-step: Calculates posterior probabilities (responsibilities) of each haplotype
+    ///      generating each read based on mismatches and current frequencies
+    ///    - M-step: Updates frequencies based on responsibilities
+    ///    - Checks for convergence using maximum absolute difference in frequencies
+    /// 4. Continues until convergence threshold or maximum iterations reached
+    ///
+    /// # Notes
+    ///
+    /// - Uses binomial probability model for mismatches between reads and haplotypes
+    /// - Handles gaps ('-') in reads by ignoring them in mismatch calculations
+    /// - Skips samples with no haplotypes
+    /// - Normalizes probabilities to handle numerical underflow
     fn expectation_maximization(&self, haplotypes: &Vec<Haplotype>) -> Vec<(String, Vec<f64>)> {
         let samples: HashSet<String> = self.reads.iter().map(|r| r.sample.clone()).collect();
         let mut all_frequencies = Vec::new();
@@ -343,6 +373,101 @@ impl HaplotypeEstimationProblem {
 
         all_frequencies
     }
+
+    /// Calculates the minimum number of recombination events required to explain the given set of haplotypes
+    /// using the Four Gamete Test (FGT) method.
+    ///
+    /// The FGT looks at pairs of positions in the haplotypes and checks if all four possible gametes (allele combinations)
+    /// are present. If all four gametes are found between two positions, at least one recombination event must have occurred
+    /// between those positions.
+    ///
+    /// # Arguments
+    ///
+    /// * `haplotypes` - A vector of Haplotype objects to analyze for recombination events
+    ///
+    /// # Returns
+    ///
+    /// The minimum number of recombination events (Rmin) required to explain the haplotype data
+    ///
+    /// # Algorithm
+    ///
+    /// 1. For each pair of positions, checks if all four gametes are present
+    /// 2. Records intervals (position pairs) where four gametes are found
+    /// 3. Trims overlapping intervals to avoid double-counting
+    /// 4. Returns count of remaining intervals as Rmin
+    fn min_recombinations(&self, haplotypes: &Vec<Haplotype>) -> usize {
+        let length = haplotypes[0].sequence.len();
+        // Matrix of possible gamete pairs for ACTG (4x4)
+        let mut gamete_counts = [[0; 4]; 4];
+        // Index is start, value is end of interval
+        let mut interval_list = vec![-1i32; length];
+        // Create rough intervals - list positions with recombinant gamete pairs
+        for pos1 in 0..length {
+            for pos2 in (pos1 + 1)..length {
+                // Reset gamete counts for this position pair
+                for row in gamete_counts.iter_mut() {
+                    row.fill(0);
+                }
+                // Count gamete pairs at these positions
+                for haplotype in haplotypes {
+                    let nuc1 = haplotype.sequence[pos1];
+                    let nuc2 = haplotype.sequence[pos2];
+                    let (i, j) = match (nuc1, nuc2) {
+                        (b'A', b'A') => (0, 0),
+                        (b'A', b'C') => (0, 1),
+                        (b'A', b'G') => (0, 2),
+                        (b'A', b'T') => (0, 3),
+                        (b'C', b'A') => (1, 0),
+                        (b'C', b'C') => (1, 1),
+                        (b'C', b'G') => (1, 2),
+                        (b'C', b'T') => (1, 3),
+                        (b'G', b'A') => (2, 0),
+                        (b'G', b'C') => (2, 1),
+                        (b'G', b'G') => (2, 2),
+                        (b'G', b'T') => (2, 3),
+                        (b'T', b'A') => (3, 0),
+                        (b'T', b'C') => (3, 1),
+                        (b'T', b'G') => (3, 2),
+                        (b'T', b'T') => (3, 3),
+                        _ => continue, // Skip non-ACGT characters
+                    };
+                    gamete_counts[i][j] = 1;
+                }
+                // Count number of gametes
+                let mut num_gametes = 0;
+                for row in &gamete_counts {
+                    for &count in row {
+                        num_gametes += count;
+                    }
+                }
+                // If we found 4 gametes, record this interval
+                if num_gametes == 4 {
+                    interval_list[pos1] = pos2 as i32;
+                }
+            }
+        }
+        // Trim intervals
+        for pos1 in 0..length {
+            if interval_list[pos1] == -1 {
+                continue;
+            }
+            for pos2 in 0..length {
+                if interval_list[pos2] == -1 || pos2 == pos1 {
+                    continue;
+                }
+                // Remove completely overlapped intervals
+                else if pos2 <= pos1 && interval_list[pos1] <= interval_list[pos2] {
+                    interval_list[pos2] = -1;
+                }
+                // Remove intervals that start within another interval
+                else if pos1 < pos2 && pos2 < interval_list[pos1] as usize {
+                    interval_list[pos2] = -1;
+                }
+            }
+        }
+        // Count number of remaining intervals/recombinations
+        interval_list.iter().filter(|&&x| x != -1).count()
+    }
 }
 
 impl CostFunction for HaplotypeEstimationProblem {
@@ -351,7 +476,6 @@ impl CostFunction for HaplotypeEstimationProblem {
 
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
         let mut total_cost = 0.0;
-
         // Calculate mismatch cost between reads and haplotypes
         for read in &self.reads {
             let mut total_mismatch_probability = 0.0;
@@ -367,29 +491,10 @@ impl CostFunction for HaplotypeEstimationProblem {
             }
             total_cost -= total_mismatch_probability.ln();
         }
-
-        // Add penalty terms
-        let num_haplotypes = haplotypes.len() as f64;
-        total_cost += self.lambda1 * num_haplotypes; // Penalty for number of haplotypes
-
-        // Penalty for diversity between haplotypes
-        let mut diversity_penalty = 0.0;
-        for (i, h1) in haplotypes.iter().enumerate() {
-            for h2 in haplotypes.iter().skip(i + 1) {
-                if h1.sample != h2.sample {
-                    continue;
-                }
-                let differences = h1
-                    .sequence
-                    .iter()
-                    .zip(&h2.sequence)
-                    .filter(|(&a, &b)| a != b && a != b'-' && b != b'-')
-                    .count();
-                diversity_penalty += differences as f64;
-            }
-        }
-        total_cost += self.lambda2 * diversity_penalty;
-
+        // Penalty from four gamete test
+        total_cost += self.lambda1 * self.min_recombinations(haplotypes) as f64;
+        // Penalty for number of haplotypes
+        total_cost += self.lambda2 * haplotypes.len() as f64;
         Ok(total_cost)
     }
 }

@@ -78,7 +78,6 @@ struct OptimizationParameters {
     sa_min_temperature: f64,
     sa_max_temperature: f64,
     sa_iterations: usize,
-    em_interval: usize,
     sa_reruns: usize,
     em_cdelta: f64,
 }
@@ -237,8 +236,6 @@ struct HaplotypeEstimationProblem {
     em_max_mismatches: usize,
     em_iterations: usize,
     em_convergence_delta: f64,
-    em_interval: usize,
-    sa_iter: std::cell::Cell<usize>, // Use Cell for interior mutability
 }
 
 impl HaplotypeEstimationProblem {
@@ -272,39 +269,35 @@ impl HaplotypeEstimationProblem {
     /// M-step: Update haplotype frequencies
     /// Repeat until convergence or max iterations
     fn expectation_maximization(&self, haplotypes: &Vec<Haplotype>) -> Vec<(String, Vec<f64>)> {
-        // Get unique samples
         let samples: HashSet<String> = self.reads.iter().map(|r| r.sample.clone()).collect();
-
         let mut all_frequencies = Vec::new();
 
         for sample in samples {
             let sample_reads: Vec<&Read> =
                 self.reads.iter().filter(|r| r.sample == sample).collect();
-
             let sample_haplotypes: Vec<(usize, &Haplotype)> = haplotypes
                 .iter()
                 .enumerate()
                 .filter(|(_, h)| h.sample == sample)
                 .collect();
-
             if sample_haplotypes.is_empty() {
                 continue;
             }
-
+            // Initialize frequencies uniformly
             let mut frequencies =
                 vec![1.0 / sample_haplotypes.len() as f64; sample_haplotypes.len()];
-            let mut old_frequencies: Vec<f64>;
 
             for _ in 0..self.em_iterations {
-                old_frequencies = frequencies.clone();
+                let old_frequencies = frequencies.clone();
 
-                // E-step: Calculate posterior probabilities
+                // E-step: Calculate responsibilities
                 let mut responsibilities =
                     vec![vec![0.0; sample_haplotypes.len()]; sample_reads.len()];
+
                 for (i, read) in sample_reads.iter().enumerate() {
                     let mut total_prob = 0.0;
 
-                    // Calculate probabilities for each haplotype
+                    // Calculate unnormalized probabilities
                     for (j, (_, haplotype)) in sample_haplotypes.iter().enumerate() {
                         let mismatches = read
                             .sequence
@@ -312,10 +305,9 @@ impl HaplotypeEstimationProblem {
                             .zip(&haplotype.sequence)
                             .filter(|(&r, &h)| r != h && r != b'-')
                             .count();
-                        let prob = frequencies[j]
-                            * (1.0 - self.error_rate)
-                                .powi((read.sequence.len() - mismatches) as i32)
-                            * self.error_rate.powi(mismatches as i32);
+
+                        let prob = self.mismatch_probability(mismatches, read.sequence.len())
+                            * frequencies[j];
                         responsibilities[i][j] = prob;
                         total_prob += prob;
                     }
@@ -415,13 +407,6 @@ impl Anneal for HaplotypeEstimationProblem {
         let mut rng = rand::thread_rng();
         let mut new_haplotypes = param.clone();
         let rand_val: f64 = rng.gen();
-
-        // Run EM algorithm periodically
-        if self.sa_iter.get() % self.em_interval == 0 {
-            let _frequencies = self.expectation_maximization(&new_haplotypes);
-        }
-        self.sa_iter.set(self.sa_iter.get() + 1);
-
         // Similar to legacy code's getNewHaplotypes function
         if new_haplotypes.len() > 1 && rand_val < 0.33 {
             // Delete a random haplotype
@@ -478,7 +463,8 @@ impl Anneal for HaplotypeEstimationProblem {
                 haplotype.sequence[pos] = new_nucleotide;
             }
         }
-
+        // Return haplotypes with EM
+        let _frequencies = self.expectation_maximization(&new_haplotypes);
         Ok(new_haplotypes)
     }
 }
@@ -507,8 +493,6 @@ fn propose_haplotypes(
         em_max_mismatches: optimization_parameters.max_mismatches,
         em_iterations: optimization_parameters.em_iterations,
         em_convergence_delta: optimization_parameters.em_cdelta,
-        em_interval: optimization_parameters.em_interval,
-        sa_iter: std::cell::Cell::new(0),
     };
     let solver = SimulatedAnnealing::new(optimization_parameters.sa_max_temperature)
         .unwrap()
@@ -549,7 +533,6 @@ fn main() -> Result<()> {
     let optimization_parameters = OptimizationParameters {
         max_mismatches: args.mismatches,
         em_cdelta: args.em_cdelta,
-        em_interval: args.em_interval,
         em_iterations: args.em_iterations,
         error_rate: args.error_rate,
         lambda1: args.lambda1,

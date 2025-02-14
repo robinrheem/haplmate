@@ -402,7 +402,7 @@ impl HaplotypeEstimationProblem {
         // Index is start, value is end of interval
         let mut interval_list = vec![-1i32; length];
         // Create rough intervals - list positions with recombinant gamete pairs
-        for pos1 in 0..length {
+        'outer: for pos1 in 0..length {
             for pos2 in (pos1 + 1)..length {
                 // Reset gamete counts for this position pair
                 for row in gamete_counts.iter_mut() {
@@ -441,8 +441,9 @@ impl HaplotypeEstimationProblem {
                     }
                 }
                 // If we found 4 gametes, record this interval
-                if num_gametes == 4 {
+                if num_gametes >= 3 {
                     interval_list[pos1] = pos2 as i32;
+                    continue 'outer;
                 }
             }
         }

@@ -684,29 +684,58 @@ impl Anneal for HaplotypeEstimationProblem {
             1 if new_haplotypes.len() >= 2 => {
                 // Recombine two random haplotypes
                 let idx1 = rng.gen_range(0..new_haplotypes.len());
-                let mut idx2;
+                let mut idx2 = rng.gen_range(0..new_haplotypes.len());
+                let mut attempts = 0;
+                const MAX_ATTEMPTS: i32 = 100;
+                // Try to find compatible haplotypes for recombination
                 loop {
-                    idx2 = rng.gen_range(0..new_haplotypes.len());
-                    if idx1 != idx2
-                        && new_haplotypes[idx1]
-                            .frequencies
-                            .keys()
-                            .any(|k| new_haplotypes[idx2].frequencies.contains_key(k))
-                    {
+                    if attempts >= MAX_ATTEMPTS {
                         break;
                     }
-                }
-                // Create recombined sequence
-                let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
-                let mut recombined = new_haplotypes[idx1].sequence.clone();
-                recombined[crossover_point..]
-                    .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
-                // Only add if this sequence doesn't already exist
-                if !new_haplotypes.iter().any(|h| h.sequence == recombined) {
-                    new_haplotypes.push(Haplotype {
-                        sequence: recombined,
-                        frequencies: new_haplotypes[idx1].frequencies.clone(),
-                    });
+                    if idx1 == idx2 {
+                        idx2 = rng.gen_range(0..new_haplotypes.len());
+                        attempts += 1;
+                        continue;
+                    }
+                    // Check if sequences are different enough to recombine
+                    let mismatches = new_haplotypes[idx1]
+                        .sequence
+                        .iter()
+                        .zip(&new_haplotypes[idx2].sequence)
+                        .filter(|(&a, &b)| a != b)
+                        .count();
+                    // Only recombine if sequences differ by at least 2 positions
+                    if mismatches >= 2 {
+                        let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
+                        let mut recombined1 = new_haplotypes[idx1].sequence.clone();
+                        let mut recombined2 = new_haplotypes[idx2].sequence.clone();
+                        recombined1[crossover_point..]
+                            .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
+                        recombined2[crossover_point..]
+                            .copy_from_slice(&new_haplotypes[idx1].sequence[crossover_point..]);
+                        let mut new_sequences = Vec::new();
+                        if !new_haplotypes.iter().any(|h| h.sequence == recombined1) {
+                            new_sequences.push(recombined1);
+                        }
+                        if !new_haplotypes.iter().any(|h| h.sequence == recombined2) {
+                            new_sequences.push(recombined2);
+                        }
+                        for new_seq in new_sequences {
+                            let mut combined_frequencies = HashMap::new();
+                            for (sample, &freq1) in &new_haplotypes[idx1].frequencies {
+                                let freq2 =
+                                    new_haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
+                                combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
+                            }
+                            new_haplotypes.push(Haplotype {
+                                sequence: new_seq,
+                                frequencies: combined_frequencies,
+                            });
+                        }
+                        break;
+                    }
+                    attempts += 1;
+                    idx2 = rng.gen_range(0..new_haplotypes.len());
                 }
             }
             2 if new_haplotypes.len() < self.reads.len() => {

@@ -668,7 +668,13 @@ impl Anneal for HaplotypeEstimationProblem {
     ) -> Result<Self::Output, anyhow::Error> {
         let mut rng = rand::thread_rng();
         let mut new_haplotypes = param.clone();
-        let operation: i32 = rng.gen_range(0..3); // Generates 0, 1, or 2 uniformly
+        // If there's only one haplotype, we can't delete it
+        // So we just add a new haplotype
+        let operation: i32 = if new_haplotypes.len() == 1 {
+            2
+        } else {
+            rng.gen_range(0..3)
+        };
         match operation {
             0 if new_haplotypes.len() > 1 => {
                 // Delete a random haplotype
@@ -784,6 +790,20 @@ fn propose_haplotypes(
     best_haplotypes
 }
 
+/// Main function
+///
+/// TODO: Add invariants
+/// TODO: Fix the test that's not passing --> init_haplotypes
+/// TODO: Parallel processing
+///
+/// # Arguments
+///
+/// * `args` - Command line arguments
+///
+/// # Returns
+///
+/// * `Ok(())` - If the program runs successfully
+/// * `Err(anyhow::Error)` - If there was an error
 fn main() -> Result<()> {
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;
@@ -809,11 +829,22 @@ fn main() -> Result<()> {
         sa_max_temperature: args.sa_max_temperature,
         sa_reruns: args.sa_reruns,
     };
-    let _proposed_haplotypes = dbg!(propose_haplotypes(
-        &reads,
-        &initial_haplotypes,
-        optimization_parameters
-    ));
+    let proposed_haplotypes =
+        propose_haplotypes(&reads, &initial_haplotypes, optimization_parameters);
+    // Print CSV headers
+    print!("sequence");
+    for sample in &args.files {
+        print!(",{}", sample);
+    }
+    println!();
+    // Print proposed haplotypes
+    for haplotype in &proposed_haplotypes {
+        print!("{}", String::from_utf8_lossy(&haplotype.sequence));
+        for sample in &args.files {
+            print!(",{}", haplotype.frequencies.get(sample).unwrap_or(&0.0));
+        }
+        println!();
+    }
     Ok(())
 }
 

@@ -32,7 +32,7 @@ struct Args {
     #[arg(long, default_value = "0.1")]
     lambda2: f64,
     /// Sequencing error
-    #[arg(short = 'd', long = "seqerr", default_value = "0.04")]
+    #[arg(short = 'd', long, default_value = "0.04")]
     error_rate: f64,
     /// Minimum temp to reach in simulated annealing
     #[arg(long, default_value = "0.0")]
@@ -842,7 +842,6 @@ fn main() -> Result<()> {
             .for_each(|sample| eprintln!("Sample {sample} is not aligned"));
         exit(1);
     }
-    let args = dbg!(args);
     let reads = extract_reads(&args.files);
     let variant_only_reads = remove_invariants(&reads);
     let initial_haplotypes = init_haplotypes(&variant_only_reads);

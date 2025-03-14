@@ -822,7 +822,6 @@ fn propose_haplotypes(
 /// Main function
 ///
 /// TODO: Add invariants
-/// TODO: Fix the test that's not passing --> init_haplotypes
 /// TODO: Parallel processing
 ///
 /// # Arguments
@@ -1209,26 +1208,33 @@ mod tests {
             b"TTG".to_vec(),
         ]);
 
-        let mut haplotype_sample1 = vec![];
-        let mut haplotype_sample2 = vec![];
+        // Check that we have all expected sequences and their frequencies are correct
+        let mut found_sample1 = HashSet::new();
+        let mut found_sample2 = HashSet::new();
 
-        for haplotype in haplotypes {
-            if haplotype.frequencies.contains_key("sample1") {
-                haplotype_sample1.push(haplotype.sequence);
-            } else if haplotype.frequencies.contains_key("sample2") {
-                haplotype_sample2.push(haplotype.sequence);
+        for haplotype in &haplotypes {
+            // Check frequencies are set correctly
+            assert!(haplotype.frequencies.contains_key("sample1"));
+            assert!(haplotype.frequencies.contains_key("sample2"));
+
+            // If frequency is 1.0 for sample1, sequence should be in expected_sample1
+            if haplotype.frequencies["sample1"] == 1.0 {
+                assert!(expected_sample1.contains(&haplotype.sequence));
+                found_sample1.insert(haplotype.sequence.clone());
+                assert_eq!(haplotype.frequencies["sample2"], 0.0);
+            }
+
+            // If frequency is 1.0 for sample2, sequence should be in expected_sample2
+            if haplotype.frequencies["sample2"] == 1.0 {
+                assert!(expected_sample2.contains(&haplotype.sequence));
+                found_sample2.insert(haplotype.sequence.clone());
+                assert_eq!(haplotype.frequencies["sample1"], 0.0);
             }
         }
 
-        assert_eq!(haplotype_sample1.len(), expected_sample1.len());
-        assert_eq!(haplotype_sample2.len(), expected_sample2.len());
-
-        for seq in haplotype_sample1 {
-            assert!(expected_sample1.contains(&seq));
-        }
-        for seq in haplotype_sample2 {
-            assert!(expected_sample2.contains(&seq));
-        }
+        // Check we found all expected sequences
+        assert_eq!(found_sample1, expected_sample1);
+        assert_eq!(found_sample2, expected_sample2);
     }
 
     #[test]

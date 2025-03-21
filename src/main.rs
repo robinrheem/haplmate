@@ -189,13 +189,15 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
 ///
 /// List of haplotypes(full sequences) with initial frequencies
 fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
-    // Track unique sequences and their samples
-    let mut haplotype_set: HashSet<(Vec<u8>, String)> = HashSet::new();
-    // First pass - collect all possible sequences per sample
+    // Track unique sequences only (without sample information)
+    let mut sequence_set: HashSet<Vec<u8>> = HashSet::new();
+    let mut sequence_counts: HashMap<Vec<u8>, HashMap<String, usize>> = HashMap::new();
+    let samples: HashSet<String> = reads.iter().map(|r| r.sample.clone()).collect();
+
+    // First pass - collect all possible sequences and count their occurrences per sample
     for read in reads {
-        // Queue to store intermediate sequences during expansion
         let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
-        queue.push_back(vec![]); // Start with an empty sequence
+        queue.push_back(vec![]);
 
         // Expand blanks iteratively
         for &nucleotide in &read.sequence {
@@ -204,35 +206,51 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
                 level_size -= 1;
                 let mut current = queue.pop_front().unwrap();
                 if nucleotide == b'-' {
-                    // For blanks, enqueue all possible nucleotides
                     for &fill in b"ACGT" {
                         let mut next = current.clone();
                         next.push(fill);
                         queue.push_back(next);
                     }
                 } else {
-                    // For normal nucleotides, continue the sequence
                     current.push(nucleotide);
                     queue.push_back(current);
                 }
             }
         }
-        // Add all fully expanded sequences with the sample to the haplotype set
+
+        // Add sequences to the set and update counts
         for sequence in queue {
-            haplotype_set.insert((sequence, read.sample.clone()));
+            sequence_set.insert(sequence.clone());
+            sequence_counts
+                .entry(sequence)
+                .or_default()
+                .entry(read.sample.clone())
+                .and_modify(|count| *count += 1)
+                .or_insert(1);
         }
     }
-    // Get unique samples
-    let samples: HashSet<String> = reads.iter().map(|r| r.sample.clone()).collect();
+
     // Convert to haplotypes with frequencies
-    haplotype_set
+    sequence_set
         .into_iter()
-        .map(|(sequence, sample)| {
+        .map(|sequence| {
             let mut frequencies = HashMap::new();
-            // Initialize frequency to 1.0 for source sample, 0.0 for others
-            for s in &samples {
-                frequencies.insert(s.clone(), if *s == sample { 1.0 } else { 0.0 });
+            let counts = sequence_counts.get(&sequence).unwrap();
+
+            // Calculate frequencies for each sample
+            for sample in &samples {
+                let sample_count = counts.get(sample).copied().unwrap_or(0) as f64;
+                let total_reads = reads.iter().filter(|r| r.sample == *sample).count() as f64;
+                frequencies.insert(
+                    sample.clone(),
+                    if total_reads > 0.0 {
+                        sample_count / total_reads
+                    } else {
+                        0.0
+                    },
+                );
             }
+
             Haplotype {
                 sequence,
                 frequencies,
@@ -1131,7 +1149,7 @@ mod tests {
         for haplotype in haplotypes {
             assert!(expected.contains(&haplotype.sequence));
             assert_eq!(haplotype.frequencies.len(), 1);
-            assert_eq!(haplotype.frequencies.get("sample1"), Some(&1.0));
+            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.5));
         }
     }
 
@@ -1155,7 +1173,7 @@ mod tests {
         for haplotype in haplotypes {
             assert!(expected.contains(&haplotype.sequence));
             assert_eq!(haplotype.frequencies.len(), 1);
-            assert_eq!(haplotype.frequencies.get("sample1"), Some(&1.0));
+            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.5));
         }
     }
 

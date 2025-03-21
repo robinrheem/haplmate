@@ -52,6 +52,9 @@ struct Args {
     /// Delta to determine intermediate EM convergence steps
     #[arg(long, default_value = "0.5")]
     em_cdelta: f64,
+    /// Random seed for deterministic output(testing purposes only)
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +82,7 @@ struct OptimizationParameters {
     sa_iterations: usize,
     sa_reruns: usize,
     em_cdelta: f64,
+    seed: Option<u64>,
 }
 
 /// Check whether all reads in samples are aligned
@@ -269,6 +273,7 @@ struct HaplotypeEstimationProblem {
     em_max_mismatches: usize,
     em_iterations: usize,
     em_convergence_delta: f64,
+    seed: Option<u64>,
 }
 
 impl HaplotypeEstimationProblem {
@@ -684,7 +689,11 @@ impl Anneal for HaplotypeEstimationProblem {
         param: &Self::Param,
         temp: Self::Float,
     ) -> Result<Self::Output, anyhow::Error> {
-        let mut rng = rand::thread_rng();
+        let mut rng = if let Some(seed) = self.seed {
+            rand::rngs::StdRng::seed_from_u64(seed)
+        } else {
+            rand::rngs::StdRng::from_entropy()
+        };
         let mut new_haplotypes = param.clone();
         // If there's only one haplotype, we can't delete it
         // So we just add a new haplotype
@@ -814,8 +823,14 @@ fn propose_haplotypes(
         em_max_mismatches: optimization_parameters.max_mismatches,
         em_iterations: optimization_parameters.em_iterations,
         em_convergence_delta: optimization_parameters.em_cdelta,
+        seed: optimization_parameters.seed,
     };
-    let solver = SimulatedAnnealing::new(optimization_parameters.sa_max_temperature)
+    let rng = if let Some(seed) = optimization_parameters.seed {
+        rand::rngs::StdRng::seed_from_u64(seed)
+    } else {
+        rand::rngs::StdRng::from_entropy()
+    };
+    let solver = SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, rng)
         .unwrap()
         .with_temp_func(SATempFunc::TemperatureFast)
         .with_stall_best(optimization_parameters.sa_iterations as u64);
@@ -877,6 +892,7 @@ fn main() -> Result<()> {
         sa_iterations: args.sa_iterations,
         sa_max_temperature: args.sa_max_temperature,
         sa_reruns: args.sa_reruns,
+        seed: args.seed,
     };
     let proposed_haplotypes =
         propose_haplotypes(&reads, &initial_haplotypes, optimization_parameters);
@@ -934,6 +950,7 @@ mod tests {
             em_max_mismatches: 3,
             em_iterations: 100,
             em_convergence_delta: 0.001,
+            seed: Some(12345),
         }
     }
 

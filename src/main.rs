@@ -862,6 +862,10 @@ fn main() -> Result<()> {
     let reads = extract_reads(&args.files);
     let variant_only_reads = remove_invariants(&reads);
     let initial_haplotypes = init_haplotypes(&variant_only_reads);
+    if initial_haplotypes.len() == 1 && initial_haplotypes[0].sequence.is_empty() {
+        eprintln!("No initial haplotypes that have meaningful information");
+        exit(1);
+    }
     let optimization_parameters = OptimizationParameters {
         samples: args.files.clone(),
         max_mismatches: args.mismatches,

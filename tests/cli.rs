@@ -115,47 +115,6 @@ fn test_basic_haplotype_estimation() -> Result<()> {
 }
 
 #[test]
-fn test_haplotype_estimation_with_gaps() -> Result<()> {
-    let temp_dir = tempdir()?;
-
-    let sample_path = temp_dir.path().join("sample.fa");
-    let mut sample = File::create(&sample_path)?;
-    // Create two identical reads with gaps
-    writeln!(sample, ">read1\nA-CT\n>read2\nA-CT")?;
-
-    let mut cmd = Command::cargo_bin("haplmate")?;
-    cmd.arg(sample_path)
-        .arg("--sa-reruns=1")
-        .arg("--sa-iterations=1")
-        .arg("--sa-max-temperature=10.0")
-        .arg("--sa-min-temperature=0.0")
-        .arg("--sa-schedule=0.1")
-        .arg("--em-interval=10")
-        .arg("--em-cdelta=0.5")
-        .arg("--lambda1=0.0")
-        .arg("--lambda2=0.0")
-        .arg("--error-rate=0.04");
-
-    let output = cmd.output()?;
-    println!(
-        "Command stdout:\n{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    println!(
-        "Command stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Check that output contains a complete sequence (no gaps)
-    cmd.assert()
-        .success()
-        .stdout(predicate::str::contains("sequence,"))
-        .stdout(predicate::str::contains("AACT,1.0")); // Expect A[ACGT]CT with frequency 1.0
-
-    Ok(())
-}
-
-#[test]
 fn test_unaligned_sequences() -> Result<()> {
     let temp_dir = tempdir()?;
 
@@ -458,6 +417,183 @@ fn test_complex_shared_patterns() -> Result<()> {
         ("TGCA", vec![0.25, 0.5, 1.0, 0.2]),
         ("GTAC", vec![0.25, 0.333, 0.0, 0.4]),
     ];
+
+    for (seq, freqs) in expected_freqs {
+        let line = stdout
+            .lines()
+            .find(|l| l.starts_with(&format!("{},", seq)))
+            .expect(&format!("Sequence {} not found", seq));
+
+        let actual_freqs: Vec<f64> = line
+            .split(',')
+            .skip(1)
+            .map(|f| f.parse::<f64>().unwrap())
+            .collect();
+
+        for (i, (actual, expected)) in actual_freqs.iter().zip(freqs.iter()).enumerate() {
+            assert!(
+                (actual - expected).abs() < 0.01,
+                "Sample {} frequency mismatch for {}: expected {}, got {}",
+                i + 1,
+                seq,
+                expected,
+                actual
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_single_sample_with_gaps() -> Result<()> {
+    let temp_dir = tempdir()?;
+
+    // Create a sample with gaps in different positions
+    let sample_path = temp_dir.path().join("sample.fa");
+    let mut sample = File::create(&sample_path)?;
+    writeln!(sample, ">read1\nA-C\n>read2\nTGC\n>read3\nTAT")?;
+
+    let mut cmd = Command::cargo_bin("haplmate")?;
+    cmd.arg(sample_path)
+        .arg("--sa-reruns=1")
+        .arg("--sa-iterations=1")
+        .arg("--sa-max-temperature=10.0")
+        .arg("--sa-min-temperature=0.0")
+        .arg("--sa-schedule=0.1")
+        .arg("--em-interval=10")
+        .arg("--em-cdelta=0.5")
+        .arg("--lambda1=0.0")
+        .arg("--lambda2=0.0")
+        .arg("--error-rate=0.04");
+
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Check header is present
+    assert!(stdout.contains("sequence,"));
+
+    // Check sequences are present with correct frequencies
+    let lines: Vec<&str> = stdout.lines().collect();
+    let mut found_tgc = false;
+    let mut found_tat = false;
+    let mut found_agc = false;
+
+    for line in lines {
+        if line.starts_with("TGC,") {
+            found_tgc = true;
+            let freq: f64 = line.split(',').nth(1).unwrap().parse().unwrap();
+            assert!((freq - 0.33).abs() < 0.01, "Expected TGC frequency ~0.33");
+        } else if line.starts_with("TAT,") {
+            found_tat = true;
+            let freq: f64 = line.split(',').nth(1).unwrap().parse().unwrap();
+            assert!((freq - 0.33).abs() < 0.01, "Expected TAT frequency ~0.33");
+        } else if line.starts_with("AGC,") {
+            found_agc = true;
+            let freq: f64 = line.split(',').nth(1).unwrap().parse().unwrap();
+            assert!((freq - 0.33).abs() < 0.01, "Expected AGC frequency ~0.33");
+        }
+    }
+
+    assert!(found_tgc, "TGC sequence not found in output");
+    assert!(found_tat, "TAT sequence not found in output");
+    assert!(found_agc, "AGC sequence not found in output");
+
+    Ok(())
+}
+
+#[test]
+fn test_multiple_samples_with_gaps() -> Result<()> {
+    let temp_dir = tempdir()?;
+
+    // Create samples with gaps and variants in different positions
+    let sample_configs = vec![
+        // Sample 1: Mix of gaps and variants at informative positions
+        (
+            "sample1.fa",
+            vec![
+                ">read1\nAC-GTACGT", // Possible completions: ACCGTACGT or ACAGTACGT
+                ">read2\nACCGT-CGT", // Possible completions: ACCGTACGT or ACCGTTCGT
+                ">read3\nACAGTTCGT", // Complete sequence
+            ],
+        ),
+        // Sample 2: Different gap patterns
+        (
+            "sample2.fa",
+            vec![
+                ">read1\nAC-GT-CGT", // Multiple gaps
+                ">read2\nAC-GTACGT", // Single gap
+                ">read3\nACCGTACGT", // Complete sequence
+            ],
+        ),
+        // Sample 3: Mix of complete and gapped sequences
+        (
+            "sample3.fa",
+            vec![
+                ">read1\nACCGTACGT",
+                ">read2\nACAGTTCGT",
+                ">read3\nAC-GTTCGT",
+            ],
+        ),
+    ];
+
+    let mut sample_paths = Vec::new();
+    for (filename, reads) in sample_configs {
+        let sample_path = temp_dir.path().join(filename);
+        let mut sample = File::create(&sample_path)?;
+        writeln!(sample, "{}", reads.join("\n"))?;
+        sample_paths.push(sample_path);
+    }
+
+    let mut cmd = Command::cargo_bin("haplmate")?;
+    for path in &sample_paths {
+        cmd.arg(path);
+    }
+    cmd.arg("--sa-reruns=1")
+        .arg("--sa-iterations=1")
+        .arg("--sa-max-temperature=10.0")
+        .arg("--sa-min-temperature=0.0")
+        .arg("--sa-schedule=0.1")
+        .arg("--em-interval=10")
+        .arg("--em-cdelta=0.5")
+        .arg("--lambda1=0.0")
+        .arg("--lambda2=0.0")
+        .arg("--error-rate=0.04");
+
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "Command stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    println!(
+        "Command stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Expected frequencies for each sequence in each sample
+    // Each column (sample) should sum to 1.0
+    let expected_freqs = vec![
+        ("ACCGTACGT", vec![0.4, 0.6, 0.4]), // Most common complete sequence
+        ("ACAGTTCGT", vec![0.3, 0.0, 0.4]), // Alternative complete sequence
+        ("ACCGTTCGT", vec![0.3, 0.4, 0.2]), // Another possible completion
+    ];
+
+    // Check header is present
+    assert!(stdout.contains("sequence,"));
+
+    for sample_idx in 0..3 {
+        let sum: f64 = expected_freqs
+            .iter()
+            .map(|(_, freqs)| freqs[sample_idx])
+            .sum();
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Sample {} frequencies sum to {} (should be 1.0)",
+            sample_idx + 1,
+            sum
+        );
+    }
 
     for (seq, freqs) in expected_freqs {
         let line = stdout

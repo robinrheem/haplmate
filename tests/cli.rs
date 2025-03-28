@@ -654,3 +654,46 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_sample_haplotypes() -> Result<()> {
+    // Run with deterministic parameters
+    let mut cmd = Command::cargo_bin("haplmate")?;
+    cmd.arg("tests/data/sample_haplotypes.fa")
+        .arg("--sa-reruns=1")
+        .arg("--sa-iterations=1")
+        .arg("--sa-max-temperature=10.0")
+        .arg("--lambda1=0.0")
+        .arg("--lambda2=0.0")
+        .arg("--seed=12345")
+        .arg("--error-rate=0.04");
+
+    let output = cmd.output()?;
+    println!(
+        "Command stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    println!(
+        "Command stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Check that the command succeeds and outputs CSV format
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("sequence,"));
+
+    // The file contains multiple reads with variations
+    // We should see multiple haplotypes in the output
+    // Note: Exact frequencies may vary due to stochastic nature of the algorithm
+    cmd.assert()
+        .success()
+        .stdout(predicate::str::contains("0.016666666666666666")); // Check for equal distribution
+
+    // Verify the sum is approximately 1.0
+    let output = cmd.output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("SUM,1."));
+
+    Ok(())
+}

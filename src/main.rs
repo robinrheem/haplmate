@@ -244,11 +244,15 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
             // Calculate frequencies for each sample
             for sample in &samples {
                 let sample_count = counts.get(sample).copied().unwrap_or(0) as f64;
-                let total_reads = reads.iter().filter(|r| r.sample == *sample).count() as f64;
+                let total_expansions: f64 = sequence_counts
+                    .values()
+                    .map(|sample_counts| sample_counts.get(sample).copied().unwrap_or(0) as f64)
+                    .sum();
+
                 frequencies.insert(
                     sample.clone(),
-                    if total_reads > 0.0 {
-                        sample_count / total_reads
+                    if total_expansions > 0.0 {
+                        sample_count / total_expansions
                     } else {
                         0.0
                     },
@@ -910,6 +914,16 @@ fn main() -> Result<()> {
         }
         println!();
     }
+    // Print sums as the last row
+    print!("SUM");
+    for sample in &args.files {
+        let sum: f64 = proposed_haplotypes
+            .iter()
+            .map(|h| h.frequencies.get(sample).unwrap_or(&0.0))
+            .sum();
+        print!(",{}", sum);
+    }
+    println!();
     Ok(())
 }
 
@@ -1155,7 +1169,7 @@ mod tests {
         for haplotype in haplotypes {
             assert!(expected.contains(&haplotype.sequence));
             assert_eq!(haplotype.frequencies.len(), 1);
-            assert_eq!(haplotype.frequencies.get("sample1"), Some(&1.0));
+            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.25));
         }
     }
 
@@ -1194,7 +1208,7 @@ mod tests {
         for haplotype in haplotypes {
             assert!(expected.contains(&haplotype.sequence));
             assert_eq!(haplotype.frequencies.len(), 1);
-            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.5));
+            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.125));
         }
     }
 
@@ -1214,7 +1228,7 @@ mod tests {
         for haplotype in haplotypes {
             assert!(expected.contains(&haplotype.sequence));
             assert_eq!(haplotype.frequencies.len(), 1);
-            assert_eq!(haplotype.frequencies.get("sample1"), Some(&1.0));
+            assert_eq!(haplotype.frequencies.get("sample1"), Some(&0.25));
         }
     }
 
@@ -1234,46 +1248,44 @@ mod tests {
         ];
         let haplotypes = init_haplotypes(&reads);
 
-        let expected_sample1: HashSet<Vec<u8>> = HashSet::from([
-            b"AAC".to_vec(),
-            b"ACC".to_vec(),
-            b"AGC".to_vec(),
-            b"ATC".to_vec(),
+        let expected_sample1: HashMap<Vec<u8>, f64> = HashMap::from([
+            (b"AAC".to_vec(), 0.25),
+            (b"ACC".to_vec(), 0.25),
+            (b"AGC".to_vec(), 0.25),
+            (b"ATC".to_vec(), 0.25),
         ]);
-        let expected_sample2: HashSet<Vec<u8>> = HashSet::from([
-            b"TAG".to_vec(),
-            b"TCG".to_vec(),
-            b"TGG".to_vec(),
-            b"TTG".to_vec(),
+        let expected_sample2: HashMap<Vec<u8>, f64> = HashMap::from([
+            (b"TAG".to_vec(), 0.25),
+            (b"TCG".to_vec(), 0.25),
+            (b"TGG".to_vec(), 0.25),
+            (b"TTG".to_vec(), 0.25),
         ]);
-
-        // Check that we have all expected sequences and their frequencies are correct
-        let mut found_sample1 = HashSet::new();
-        let mut found_sample2 = HashSet::new();
 
         for haplotype in &haplotypes {
             // Check frequencies are set correctly
             assert!(haplotype.frequencies.contains_key("sample1"));
             assert!(haplotype.frequencies.contains_key("sample2"));
 
-            // If frequency is 1.0 for sample1, sequence should be in expected_sample1
-            if haplotype.frequencies["sample1"] == 1.0 {
-                assert!(expected_sample1.contains(&haplotype.sequence));
-                found_sample1.insert(haplotype.sequence.clone());
+            // Check if sequence is from sample1's expansions
+            if let Some(&expected_freq) = expected_sample1.get(&haplotype.sequence) {
+                assert!((haplotype.frequencies["sample1"] - expected_freq).abs() < 1e-10);
                 assert_eq!(haplotype.frequencies["sample2"], 0.0);
             }
 
-            // If frequency is 1.0 for sample2, sequence should be in expected_sample2
-            if haplotype.frequencies["sample2"] == 1.0 {
-                assert!(expected_sample2.contains(&haplotype.sequence));
-                found_sample2.insert(haplotype.sequence.clone());
+            // Check if sequence is from sample2's expansions
+            if let Some(&expected_freq) = expected_sample2.get(&haplotype.sequence) {
+                assert!((haplotype.frequencies["sample2"] - expected_freq).abs() < 1e-10);
                 assert_eq!(haplotype.frequencies["sample1"], 0.0);
             }
         }
 
         // Check we found all expected sequences
-        assert_eq!(found_sample1, expected_sample1);
-        assert_eq!(found_sample2, expected_sample2);
+        let found_sequences: HashSet<_> = haplotypes.iter().map(|h| &h.sequence).collect();
+        let expected_sequences: HashSet<_> = expected_sample1
+            .keys()
+            .chain(expected_sample2.keys())
+            .collect();
+        assert_eq!(found_sequences, expected_sequences);
     }
 
     #[test]

@@ -13,6 +13,7 @@ rayon = "1.10.0"
 seq_io = "0.3.2"
 statrs = "0.18.0"
 tempfile = "3.15.0"
+tracing = "0.1.41"
 
 [dev-dependencies]
 assert_cmd = "2.0.16"

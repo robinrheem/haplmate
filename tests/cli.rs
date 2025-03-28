@@ -47,6 +47,7 @@ fn test_proposed_haplotypes() -> Result<(), Box<dyn std::error::Error>> {
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;
@@ -92,6 +93,7 @@ fn test_basic_haplotype_estimation() -> Result<()> {
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;
@@ -164,6 +166,7 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--em-interval=10")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.5")
+        .arg("--seed=12345")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0");
 
@@ -183,6 +186,7 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--em-interval=10")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.04")
+        .arg("--seed=12345")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0");
 
@@ -246,6 +250,7 @@ fn test_multiple_samples() -> Result<()> {
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     // Run the command and capture output
@@ -299,10 +304,19 @@ fn test_shared_haplotypes() -> Result<()> {
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
+    println!(
+        "Command stdout:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    println!(
+        "Command stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Check header is present
     assert!(stdout.contains("sequence,"));
@@ -406,6 +420,7 @@ fn test_complex_shared_patterns() -> Result<()> {
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;
@@ -465,6 +480,7 @@ fn test_single_sample_with_gaps() -> Result<()> {
         .arg("--em-cdelta=0.5")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;
@@ -558,6 +574,7 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
         .arg("--em-cdelta=0.5")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
+        .arg("--seed=12345")
         .arg("--error-rate=0.04");
 
     let output = cmd.output()?;

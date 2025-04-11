@@ -596,22 +596,22 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
     );
     // Expected frequencies for each sequence in each sample
     let expected_freqs = vec![
-        ("AA", vec![0.1111, 0.0952, 0.0]),
-        ("GG", vec![0.0, 0.0476, 0.0]),
-        ("CG", vec![0.1111, 0.0476, 0.0]),
-        ("CA", vec![0.2222, 0.1429, 0.1667]),
-        ("GC", vec![0.0, 0.0476, 0.0]),
-        ("AG", vec![0.0, 0.0476, 0.0]),
-        ("TC", vec![0.0, 0.0476, 0.0]),
-        ("TG", vec![0.0, 0.0476, 0.0]),
-        ("GA", vec![0.1111, 0.0952, 0.0]),
-        ("CC", vec![0.1111, 0.0476, 0.0]),
-        ("TA", vec![0.1111, 0.0952, 0.0]),
-        ("AT", vec![0.1111, 0.0476, 0.3333]),
-        ("CT", vec![0.1111, 0.0476, 0.1667]),
-        ("AC", vec![0.0, 0.0476, 0.0]),
-        ("GT", vec![0.0, 0.0476, 0.1667]),
-        ("TT", vec![0.0, 0.0476, 0.1667]),
+        ("ACAGTACGT", vec![0.1111, 0.0952, 0.0]),
+        ("ACGGTGCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACCGTGCGT", vec![0.1111, 0.0476, 0.0]),
+        ("ACCGTACGT", vec![0.2222, 0.1429, 0.1667]),
+        ("ACGGTCCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACAGTGCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACTGTCCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACTGTGCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACGGTACGT", vec![0.1111, 0.0952, 0.0]),
+        ("ACCGTCCGT", vec![0.1111, 0.0476, 0.0]),
+        ("ACTGTACGT", vec![0.1111, 0.0952, 0.0]),
+        ("ACAGTTCGT", vec![0.1111, 0.0476, 0.3333]),
+        ("ACCGTTCGT", vec![0.1111, 0.0476, 0.1667]),
+        ("ACAGTCCGT", vec![0.0, 0.0476, 0.0]),
+        ("ACGGTTCGT", vec![0.0, 0.0476, 0.1667]),
+        ("ACTGTTCGT", vec![0.0, 0.0476, 0.1667]),
     ];
 
     // Verify that frequencies sum to approximately 1.0 for each sample

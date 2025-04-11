@@ -122,7 +122,7 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
         .collect())
 }
 
-/// Remove all invariants from all reads
+/// Remove all invariants from all reads and track their positions
 ///
 /// # Arguments
 ///
@@ -130,22 +130,31 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
 ///
 /// # Returns
 ///
-/// A list of reads that have removed invariants
-fn remove_invariants(reads: &Vec<Read>) -> Vec<Read> {
+/// A tuple containing:
+/// * The list of reads with invariants removed
+/// * A vector of (position, nucleotide) pairs for the invariant positions
+fn remove_invariants(reads: &Vec<Read>) -> (Vec<Read>, Vec<(usize, u8)>) {
     let mut filtered_sequences = vec![Vec::new(); reads.len()];
+    let mut invariant_positions = Vec::new();
+
     for i in 0..reads.first().unwrap().sequence.len() {
         let column: Vec<u8> = reads.iter().map(|read| read.sequence[i]).collect();
         let unique_nucleotides: HashSet<u8> =
             column.iter().filter(|&&c| c != b'-').copied().collect();
-        // Skip if only one type of nucleotide (or all gaps)
+
+        // If only one type of nucleotide (or all gaps), it's invariant
         if unique_nucleotides.len() <= 1 {
+            if let Some(&nucleotide) = unique_nucleotides.iter().next() {
+                invariant_positions.push((i, nucleotide));
+            }
             continue;
         }
         for (j, c) in column.into_iter().enumerate() {
             filtered_sequences[j].push(c);
         }
     }
-    reads
+
+    let filtered_reads = reads
         .iter()
         .enumerate()
         .map(|(i, read)| Read {
@@ -153,7 +162,9 @@ fn remove_invariants(reads: &Vec<Read>) -> Vec<Read> {
             sequence: filtered_sequences[i].clone(),
             sample: read.sample.clone(),
         })
-        .collect()
+        .collect();
+
+    (filtered_reads, invariant_positions)
 }
 
 /// Read all reads from the sample
@@ -287,6 +298,49 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         haplotypes.len()
     );
     haplotypes
+}
+
+/// Restore invariant positions to a sequence
+///
+/// # Arguments
+///
+/// * `sequence` - The sequence without invariant positions
+/// * `invariant_positions` - Vector of (position, nucleotide) pairs for invariant positions
+///
+/// # Returns
+///
+/// The sequence with invariant positions restored
+fn restore_invariants(sequence: &[u8], invariant_positions: &[(usize, u8)]) -> Vec<u8> {
+    let full_length = sequence.len() + invariant_positions.len();
+    let mut restored = vec![0u8; full_length];
+    let mut seq_pos = 0;
+    let mut curr_pos = 0;
+
+    // Sort positions to ensure correct order
+    let mut sorted_positions = invariant_positions.to_vec();
+    sorted_positions.sort_by_key(|&(pos, _)| pos);
+
+    // Fill in the sequence
+    for (pos, nucleotide) in sorted_positions {
+        // Copy sequence up to this position
+        while curr_pos < pos && seq_pos < sequence.len() {
+            restored[curr_pos] = sequence[seq_pos];
+            curr_pos += 1;
+            seq_pos += 1;
+        }
+        // Insert invariant nucleotide
+        restored[curr_pos] = nucleotide;
+        curr_pos += 1;
+    }
+
+    // Copy any remaining sequence
+    while seq_pos < sequence.len() {
+        restored[curr_pos] = sequence[seq_pos];
+        curr_pos += 1;
+        seq_pos += 1;
+    }
+
+    restored
 }
 
 #[derive(Clone)]
@@ -975,7 +1029,7 @@ fn main() -> Result<()> {
         exit(1);
     }
     let reads = extract_reads(&args.files);
-    let variant_only_reads = remove_invariants(&reads);
+    let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
     let initial_haplotypes = init_haplotypes(&variant_only_reads);
     if initial_haplotypes.len() == 1 && initial_haplotypes[0].sequence.is_empty() {
         eprintln!("No initial haplotypes that have meaningful information");
@@ -1002,9 +1056,10 @@ fn main() -> Result<()> {
         print!(",{}", sample);
     }
     println!();
-    // Print proposed haplotypes
+    // Print proposed haplotypes with restored invariant positions
     for haplotype in &proposed_haplotypes {
-        print!("{}", String::from_utf8_lossy(&haplotype.sequence));
+        let restored_sequence = restore_invariants(&haplotype.sequence, &invariant_positions);
+        print!("{}", String::from_utf8_lossy(&restored_sequence));
         for sample in &args.files {
             print!(",{}", haplotype.frequencies.get(sample).unwrap_or(&0.0));
         }
@@ -1069,7 +1124,7 @@ mod tests {
         let reads = create_test_reads(vec!["AAGTC", "AAATC", "AACTC"], "sample1");
         let result = remove_invariants(&reads);
 
-        for (i, read) in result.iter().enumerate() {
+        for (i, read) in result.0.iter().enumerate() {
             assert_eq!(
                 read.id,
                 format!("read{}", i + 1),
@@ -1078,9 +1133,9 @@ mod tests {
             );
             assert_eq!(read.sample, "sample1", "Sample mismatch for read {}", i + 1);
         }
-        assert_eq!(result[0].sequence, b"G");
-        assert_eq!(result[1].sequence, b"A");
-        assert_eq!(result[2].sequence, b"C");
+        assert_eq!(result.0[0].sequence, b"G");
+        assert_eq!(result.0[1].sequence, b"A");
+        assert_eq!(result.0[2].sequence, b"C");
     }
 
     #[test]
@@ -1088,7 +1143,7 @@ mod tests {
         let reads = create_test_reads(vec!["AAAAA", "AAAAA", "AAAAA"], "sample1");
         let result = remove_invariants(&reads);
 
-        for (i, read) in result.iter().enumerate() {
+        for (i, read) in result.0.iter().enumerate() {
             assert!(
                 read.sequence.is_empty(),
                 "Sequence for read {} should be empty, but got: {:?}",
@@ -1103,9 +1158,9 @@ mod tests {
         let reads = create_test_reads(vec!["ACTG", "GCTA", "TGCA"], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result[0].sequence, b"ACTG");
-        assert_eq!(result[1].sequence, b"GCTA");
-        assert_eq!(result[2].sequence, b"TGCA");
+        assert_eq!(result.0[0].sequence, b"ACTG");
+        assert_eq!(result.0[1].sequence, b"GCTA");
+        assert_eq!(result.0[2].sequence, b"TGCA");
     }
 
     #[test]
@@ -1113,7 +1168,7 @@ mod tests {
         let reads = create_test_reads(vec!["A-CTG", "A-CTG", "A-CTG"], "sample1");
         let result = remove_invariants(&reads);
 
-        for (i, read) in result.iter().enumerate() {
+        for (i, read) in result.0.iter().enumerate() {
             assert!(
                 read.sequence.is_empty(),
                 "Sequence for read {} should be empty, but got: {:?}",
@@ -1128,9 +1183,9 @@ mod tests {
         let reads = create_test_reads(vec!["A-CTA", "A-CTA", "A-GTA"], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result[0].sequence, b"C",);
-        assert_eq!(result[1].sequence, b"C",);
-        assert_eq!(result[2].sequence, b"G",);
+        assert_eq!(result.0[0].sequence, b"C",);
+        assert_eq!(result.0[1].sequence, b"C",);
+        assert_eq!(result.0[2].sequence, b"G",);
     }
 
     #[test]
@@ -1138,9 +1193,9 @@ mod tests {
         let reads = create_test_reads(vec!["-ACTA", "A-CTA", "A-GTA"], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result[0].sequence, b"C",);
-        assert_eq!(result[1].sequence, b"C",);
-        assert_eq!(result[2].sequence, b"G",);
+        assert_eq!(result.0[0].sequence, b"C",);
+        assert_eq!(result.0[1].sequence, b"C",);
+        assert_eq!(result.0[2].sequence, b"G",);
     }
 
     #[test]
@@ -1148,11 +1203,11 @@ mod tests {
         let reads = create_test_reads(vec!["ACGT"], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result.len(), 1, "Should have exactly one result");
+        assert_eq!(result.0.len(), 1, "Should have exactly one result");
         assert!(
-            result[0].sequence.is_empty(),
+            result.0[0].sequence.is_empty(),
             "Single read sequence should be empty, but got: {:?}",
-            String::from_utf8_lossy(&result[0].sequence)
+            String::from_utf8_lossy(&result.0[0].sequence)
         );
     }
 
@@ -1161,8 +1216,8 @@ mod tests {
         let reads = create_test_reads(vec!["", "", ""], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result.len(), 3, "Should have three results");
-        for (i, read) in result.iter().enumerate() {
+        assert_eq!(result.0.len(), 3, "Should have three results");
+        for (i, read) in result.0.iter().enumerate() {
             assert!(
                 read.sequence.is_empty(),
                 "Sequence {} should be empty, but got: {:?}",
@@ -1205,10 +1260,10 @@ mod tests {
             },
         ];
         let result = remove_invariants(&reads);
-        assert_eq!(result[0].id, "custom_id_1",);
-        assert_eq!(result[0].sample, "sample_A",);
-        assert_eq!(result[1].id, "custom_id_2",);
-        assert_eq!(result[1].sample, "sample_B",);
+        assert_eq!(result.0[0].id, "custom_id_1",);
+        assert_eq!(result.0[0].sample, "sample_A",);
+        assert_eq!(result.0[1].id, "custom_id_2",);
+        assert_eq!(result.0[1].sample, "sample_B",);
     }
 
     #[test]
@@ -1218,8 +1273,8 @@ mod tests {
         let reads = create_test_reads(vec![&long_seq_a, &long_seq_b], "sample1");
         let result = remove_invariants(&reads);
 
-        assert_eq!(result[0].sequence, b"A",);
-        assert_eq!(result[1].sequence, b"T",);
+        assert_eq!(result.0[0].sequence, b"A",);
+        assert_eq!(result.0[1].sequence, b"T",);
     }
 
     #[test]
@@ -1227,7 +1282,7 @@ mod tests {
         let reads = create_test_reads(vec!["----", "----", "----"], "sample1");
         let result = remove_invariants(&reads);
 
-        for (i, read) in result.iter().enumerate() {
+        for (i, read) in result.0.iter().enumerate() {
             assert!(
                 read.sequence.is_empty(),
                 "Sequence for read {} should be empty, but got: {:?}",
@@ -1501,5 +1556,56 @@ mod tests {
         ]);
         // Since we need 3+ gametes for recombination, this should be 0
         assert_eq!(problem.min_recombinations(&haplotypes), 0);
+    }
+
+    #[test]
+    fn test_restore_invariants() {
+        // Basic test
+        let sequence = b"AC";
+        let invariant_positions = vec![(1, b'T')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"ATC");
+
+        // Multiple invariant positions
+        let sequence = b"AC";
+        let invariant_positions = vec![(1, b'T'), (3, b'G')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"ATCG");
+
+        // Invariant at start
+        let sequence = b"AC";
+        let invariant_positions = vec![(0, b'T')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"TAC");
+
+        // Invariant at end
+        let sequence = b"AC";
+        let invariant_positions = vec![(2, b'T')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"ACT");
+
+        // Multiple invariants in middle
+        let sequence = b"AC";
+        let invariant_positions = vec![(1, b'T'), (2, b'G')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"ATGC");
+
+        // Empty sequence
+        let sequence = b"";
+        let invariant_positions = vec![(0, b'T')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"T");
+
+        // No invariants
+        let sequence = b"AC";
+        let invariant_positions = vec![];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"AC");
+
+        // Unsorted positions
+        let sequence = b"AC";
+        let invariant_positions = vec![(2, b'G'), (1, b'T')];
+        let result = restore_invariants(sequence, &invariant_positions);
+        assert_eq!(result, b"ATGC");
     }
 }

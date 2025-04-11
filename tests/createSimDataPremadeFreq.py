@@ -45,12 +45,12 @@ with open(frequencyOutput, 'w') as hp:
     for pos, key in enumerate(sequences):
         totHapReads = 0
         hp.write(key)
-        readOutput = f"data/simulated_reads_{pos}.fa"
-        with open(readOutput, "w") as fp:
-            for i in range(0, sampleNum):
-                totalReads = int(round(frequencies[pos][i]*numReads))
-                hp.write("," + str(totalReads/numReads))
-                for k in range(0, totalReads):
+        for i in range(0, sampleNum):
+            totalReads = int(round(frequencies[pos][i]*numReads))
+            hp.write("," + str(totalReads/numReads))
+            readOutput = f"data/simulated_reads_{i}.fa"
+            for k in range(0, totalReads):
+                with open(readOutput, "a") as fp:
                     # fp.write(str(pos) + "-" + str(totHapReads).zfill(2) + " " + str(i) + "\n")
                     fp.write(f">read{pos}-{str(totHapReads).zfill(2)} {i}\n")
                     # fp.write(sequences[key])

@@ -262,21 +262,22 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         "Found {} unique sequences across all samples",
         sequence_set.len()
     );
+    // Calculate total expansions per sample once before processing individual sequences
+    let mut total_expansions_per_sample: HashMap<String, f64> = HashMap::new();
+    for sample in &samples {
+        let total: f64 = sequence_counts
+            .values()
+            .map(|sample_counts| sample_counts.get(sample).copied().unwrap_or(0) as f64)
+            .sum();
+        total_expansions_per_sample.insert(sample.clone(), total);
+    }
     // Convert to haplotypes with frequencies
     let haplotypes: Vec<Haplotype> = sequence_set
         .into_iter()
         .map(|sequence| {
             let mut frequencies = HashMap::new();
             let counts = sequence_counts.get(&sequence).unwrap();
-            let mut total_expansions_per_sample: HashMap<String, f64> = HashMap::new();
-            for sample in &samples {
-                let total: f64 = sequence_counts
-                    .values()
-                    .map(|sample_counts| sample_counts.get(sample).copied().unwrap_or(0) as f64)
-                    .sum();
-                total_expansions_per_sample.insert(sample.clone(), total);
-            }
-            // Calculate frequencies for each sample
+            // Calculate frequencies for each sample using the pre-calculated totals
             for sample in &samples {
                 let sample_count = counts.get(sample).copied().unwrap_or(0) as f64;
                 let total_expansions: f64 =
@@ -290,7 +291,6 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
                     },
                 );
             }
-
             Haplotype {
                 sequence,
                 frequencies,

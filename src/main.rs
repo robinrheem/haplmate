@@ -268,15 +268,19 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         .map(|sequence| {
             let mut frequencies = HashMap::new();
             let counts = sequence_counts.get(&sequence).unwrap();
-
-            // Calculate frequencies for each sample
+            let mut total_expansions_per_sample: HashMap<String, f64> = HashMap::new();
             for sample in &samples {
-                let sample_count = counts.get(sample).copied().unwrap_or(0) as f64;
-                let total_expansions: f64 = sequence_counts
+                let total: f64 = sequence_counts
                     .values()
                     .map(|sample_counts| sample_counts.get(sample).copied().unwrap_or(0) as f64)
                     .sum();
-
+                total_expansions_per_sample.insert(sample.clone(), total);
+            }
+            // Calculate frequencies for each sample
+            for sample in &samples {
+                let sample_count = counts.get(sample).copied().unwrap_or(0) as f64;
+                let total_expansions: f64 =
+                    *total_expansions_per_sample.get(sample).unwrap_or(&0.0);
                 frequencies.insert(
                     sample.clone(),
                     if total_expansions > 0.0 {

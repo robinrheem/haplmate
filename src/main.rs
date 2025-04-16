@@ -1032,7 +1032,7 @@ fn propose_haplotypes(
             i
         );
         let result = Executor::new(problem.clone(), solver.clone())
-            .configure(|state| state.param(initial_haplotypes.clone()))
+            .configure(|state| state.param(best_haplotypes.clone()))
             .run()
             .unwrap();
         let best_cost = result.state().best_cost;

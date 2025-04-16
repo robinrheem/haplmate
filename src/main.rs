@@ -454,8 +454,8 @@ impl HaplotypeEstimationProblem {
             let mut theta_old = vec![1.0 / num_haps as f64; num_haps];
             let mut theta_new = vec![0.0; num_haps];
             let mut theta_2 = vec![0.0; num_haps]; // Added for square EM
-                                                   // Create sparse matrices instead of dense ones
-                                                   // Build sparse matrices in triplet format, then convert to CSR for efficient operations
+
+            // Create sparse matrices instead of dense ones
             let mut mismatches_triplet = TriMat::new((num_reads, num_haps));
             // Calculate initial mismatches
             for (i, read) in sample_reads.iter().enumerate() {
@@ -498,7 +498,7 @@ impl HaplotypeEstimationProblem {
             let mut likelihood_new;
             // EM iterations
             for _ in 0..self.em_iterations {
-                // Prepare matrices for E-step
+                // Create a new TriMat for E-step since we can't clear existing ones
                 let mut mismatch_fp_new_triplet = TriMat::new((num_reads, num_haps));
                 // E-step: Calculate expected values of latent variables
                 for i in 0..num_reads {
@@ -522,8 +522,11 @@ impl HaplotypeEstimationProblem {
 
                     theta_new[j] = col_sum / num_reads as f64;
                 }
-                // Update mismatch_fp for next iteration
+
+                // Create a new triplet for next iteration
                 let mut next_fp_triplet = TriMat::new((num_reads, num_haps));
+
+                // Update mismatch_fp for next iteration
                 for i in 0..num_reads {
                     if let Some(row) = mismatches_mat.outer_view(i) {
                         for (j, &val) in row.iter() {
@@ -558,8 +561,8 @@ impl HaplotypeEstimationProblem {
                 likelihood_old = likelihood_new;
                 theta_2.copy_from_slice(&theta_old);
                 theta_old.copy_from_slice(&theta_new);
-                mismatch_fp_2 = mismatch_fp_old.clone();
-                mismatch_fp_old = mismatch_fp_new.clone();
+                mismatch_fp_2 = mismatch_fp_old;
+                mismatch_fp_old = mismatch_fp_new;
             }
         }
         // Remove haplotypes with zero frequencies across all samples
@@ -1491,6 +1494,7 @@ mod tests {
             "Haplotypes should be empty for empty reads"
         );
     }
+
     #[test]
     fn test_no_recombination() {
         let problem = create_test_problem();

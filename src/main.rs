@@ -743,26 +743,47 @@ impl CostFunction for HaplotypeEstimationProblem {
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
         let mut total_cost = 0.0;
         // Calculate mismatch cost between reads and haplotypes
-        for read in &self.reads {
-            let mut total_mismatch_probability = 0.0;
-            for haplotype in haplotypes
+        let mut mismatch_cache: HashMap<(usize, usize), f64> = HashMap::new();
+        let reads_by_sample: HashMap<&String, Vec<(usize, &Read)>> = self
+            .reads
+            .iter()
+            .enumerate()
+            .map(|(idx, read)| (idx, read))
+            .fold(HashMap::new(), |mut acc, (idx, read)| {
+                acc.entry(&read.sample)
+                    .or_insert_with(Vec::new)
+                    .push((idx, read));
+                acc
+            });
+        for (sample, sample_reads) in &reads_by_sample {
+            // Find haplotypes for this sample once
+            let sample_haplotypes: Vec<(usize, &Haplotype)> = haplotypes
                 .iter()
-                .filter(|h| h.frequencies.contains_key(&read.sample))
-            {
-                let mismatches = read
-                    .sequence
-                    .iter()
-                    .zip(&haplotype.sequence)
-                    .filter(|(&r, &h)| r != h && r != b'-')
-                    .count();
-                total_mismatch_probability +=
-                    self.mismatch_probability(mismatches, read.sequence.len());
+                .enumerate()
+                .filter(|(_, h)| h.frequencies.contains_key(*sample))
+                .collect();
+            for &(read_idx, read) in sample_reads {
+                let mut total_mismatch_probability = 0.0;
+                for &(hap_idx, haplotype) in &sample_haplotypes {
+                    // Use cached probability or calculate and cache it
+                    let probability =
+                        *mismatch_cache
+                            .entry((read_idx, hap_idx))
+                            .or_insert_with(|| {
+                                let mismatches = read
+                                    .sequence
+                                    .iter()
+                                    .zip(&haplotype.sequence)
+                                    .filter(|(&r, &h)| r != h && r != b'-')
+                                    .count();
+                                self.mismatch_probability(mismatches, read.sequence.len())
+                            });
+                    total_mismatch_probability += probability;
+                }
+                if total_mismatch_probability > 0.0 {
+                    total_cost -= total_mismatch_probability.ln();
+                }
             }
-            total_cost -= if total_mismatch_probability > 0.0 {
-                total_mismatch_probability.ln()
-            } else {
-                0.0
-            };
         }
         // Penalty from four gamete test
         total_cost += self.lambda1 * self.min_recombinations(haplotypes) as f64;

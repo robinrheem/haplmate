@@ -61,7 +61,6 @@ struct Args {
 
 #[derive(Debug, Clone)]
 struct Read {
-    id: String,
     sequence: Vec<u8>,
     sample: String,
 }
@@ -158,7 +157,6 @@ fn remove_invariants(reads: &Vec<Read>) -> (Vec<Read>, Vec<(usize, u8)>) {
         .iter()
         .enumerate()
         .map(|(i, read)| Read {
-            id: read.id.clone(),
             sequence: filtered_sequences[i].clone(),
             sample: read.sample.clone(),
         })
@@ -186,7 +184,6 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
             .filter_map(|result| result.ok())
             .for_each(|record| {
                 reads.push(Read {
-                    id: record.id().unwrap().to_string(),
                     sequence: record.seq().to_vec(),
                     sample: sample.to_string(),
                 });
@@ -214,12 +211,6 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
     debug!("Found {} unique samples", samples.len());
     // First pass - collect all possible sequences and count their occurrences per sample
     for (read_idx, read) in reads.iter().enumerate() {
-        trace!(
-            "Processing read {}/{}: {}",
-            read_idx + 1,
-            reads.len(),
-            read.id
-        );
         let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
         queue.push_back(vec![]);
         // Expand blanks iteratively
@@ -244,7 +235,7 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         }
         debug!(
             "Read {}: generated {} possible sequences",
-            read.id,
+            read_idx + 1,
             queue.len()
         );
         // Add sequences to the set and update counts
@@ -1090,9 +1081,7 @@ mod tests {
     fn create_test_reads(sequences: Vec<&str>, sample: &str) -> Vec<Read> {
         sequences
             .into_iter()
-            .enumerate()
-            .map(|(i, seq)| Read {
-                id: format!("read{}", i + 1),
+            .map(|seq| Read {
                 sequence: seq.as_bytes().to_vec(),
                 sample: sample.to_string(),
             })
@@ -1129,12 +1118,6 @@ mod tests {
         let result = remove_invariants(&reads);
 
         for (i, read) in result.0.iter().enumerate() {
-            assert_eq!(
-                read.id,
-                format!("read{}", i + 1),
-                "ID mismatch for read {}",
-                i + 1
-            );
             assert_eq!(read.sample, "sample1", "Sample mismatch for read {}", i + 1);
         }
         assert_eq!(result.0[0].sequence, b"G");
@@ -1236,12 +1219,10 @@ mod tests {
     fn test_different_sequence_lengths() {
         let mut reads = Vec::new();
         reads.push(Read {
-            id: "read1".to_string(),
             sequence: b"ACGT".to_vec(),
             sample: "sample1".to_string(),
         });
         reads.push(Read {
-            id: "read2".to_string(),
             sequence: b"ACG".to_vec(),
             sample: "sample1".to_string(),
         });
@@ -1253,20 +1234,16 @@ mod tests {
     fn test_preserve_metadata() {
         let reads = vec![
             Read {
-                id: "custom_id_1".to_string(),
                 sequence: b"ACGT".to_vec(),
                 sample: "sample_A".to_string(),
             },
             Read {
-                id: "custom_id_2".to_string(),
                 sequence: b"AGGT".to_vec(),
                 sample: "sample_B".to_string(),
             },
         ];
         let result = remove_invariants(&reads);
-        assert_eq!(result.0[0].id, "custom_id_1",);
         assert_eq!(result.0[0].sample, "sample_A",);
-        assert_eq!(result.0[1].id, "custom_id_2",);
         assert_eq!(result.0[1].sample, "sample_B",);
     }
 
@@ -1391,12 +1368,10 @@ mod tests {
     fn test_reads_from_different_samples() {
         let reads = vec![
             Read {
-                id: "read1".to_string(),
                 sequence: b"A-C".to_vec(),
                 sample: "sample1".to_string(),
             },
             Read {
-                id: "read2".to_string(),
                 sequence: b"T-G".to_vec(),
                 sample: "sample2".to_string(),
             },

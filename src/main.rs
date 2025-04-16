@@ -436,6 +436,10 @@ impl HaplotypeEstimationProblem {
                 }
                 likelihood
             };
+
+        // Create a cache for mismatch counts between reads and haplotypes
+        let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
+
         for sample in &self.samples {
             let sample_reads: Vec<&Read> =
                 self.reads.iter().filter(|r| r.sample == *sample).collect();
@@ -453,13 +457,14 @@ impl HaplotypeEstimationProblem {
                                                                           // Calculate initial mismatches and mismatch_fp
             for (i, read) in sample_reads.iter().enumerate() {
                 for (j, haplotype) in haplotypes.iter().enumerate() {
-                    let mismatch_count = read
-                        .sequence
-                        .iter()
-                        .zip(&haplotype.sequence)
-                        .filter(|(&r, &h)| r != h && r != b'-')
-                        .count();
-
+                    // Use cached mismatch count or calculate and cache it
+                    let mismatch_count = *mismatch_cache.entry((i, j)).or_insert_with(|| {
+                        read.sequence
+                            .iter()
+                            .zip(&haplotype.sequence)
+                            .filter(|(&r, &h)| r != h && r != b'-')
+                            .count()
+                    });
                     mismatches[i][j] =
                         self.mismatch_probability(mismatch_count, read.sequence.len());
                     mismatch_fp_old[i][j] = mismatches[i][j] * theta_old[j];
@@ -999,7 +1004,6 @@ fn propose_haplotypes(
 
 /// Main function
 ///
-/// TODO: Add invariants
 /// TODO: Parallel processing
 ///
 /// # Arguments

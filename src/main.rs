@@ -1022,7 +1022,7 @@ fn propose_haplotypes(
 fn main() -> Result<()> {
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(tracing::Level::TRACE)
         .init();
     let args = Args::parse();
     let unaligned = unaligned_samples(&args.files)?;

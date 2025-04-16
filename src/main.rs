@@ -764,6 +764,7 @@ impl CostFunction for HaplotypeEstimationProblem {
         total_cost += self.lambda1 * self.min_recombinations(haplotypes) as f64;
         // Penalty for number of haplotypes
         total_cost += self.lambda2 * haplotypes.len() as f64;
+        info!("Total cost: {}", total_cost);
         Ok(total_cost)
     }
 }
@@ -1024,7 +1025,12 @@ fn propose_haplotypes(
         .with_stall_best(optimization_parameters.sa_iterations as u64);
     let mut best_haplotypes = initial_haplotypes.clone();
     let mut best_objective = f64::INFINITY;
-    for _ in 0..optimization_parameters.sa_reruns {
+    for i in 0..optimization_parameters.sa_reruns {
+        info!(
+            "Running SA with {} haplotypes, iteration {}",
+            initial_haplotypes.len(),
+            i
+        );
         let result = Executor::new(problem.clone(), solver.clone())
             .configure(|state| state.param(initial_haplotypes.clone()))
             .run()
@@ -1034,6 +1040,8 @@ fn propose_haplotypes(
             if let Some(ref param) = result.state().best_param {
                 best_haplotypes = param.clone();
                 best_objective = best_cost;
+                info!("New best haplotypes: {}", best_haplotypes.len());
+                info!("New best objective: {}", best_objective);
             }
         }
     }

@@ -758,7 +758,11 @@ impl CostFunction for HaplotypeEstimationProblem {
                 total_mismatch_probability +=
                     self.mismatch_probability(mismatches, read.sequence.len());
             }
-            total_cost -= total_mismatch_probability.ln();
+            total_cost -= if total_mismatch_probability > 0.0 {
+                total_mismatch_probability.ln()
+            } else {
+                0.0
+            };
         }
         // Penalty from four gamete test
         total_cost += self.lambda1 * self.min_recombinations(haplotypes) as f64;

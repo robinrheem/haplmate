@@ -507,7 +507,7 @@ impl HaplotypeEstimationProblem {
             let mut mismatch_fp_2 = vec![vec![0.0; num_haps]; num_reads];
 
             // EM update closure - equivalent to sqEMUpdate in C
-            let em_update = |theta_in: &[f64],
+            let em_update = |_theta_in: &[f64],
                              mismatch_fp_in: &Vec<Vec<f64>>,
                              theta_out: &mut [f64],
                              mismatch_fp_out: &mut Vec<Vec<f64>>| {
@@ -540,7 +540,7 @@ impl HaplotypeEstimationProblem {
             };
 
             // Calculate likelihood closure - equivalent to EM_likelihood_sq in C
-            let calculate_likelihood = |theta: &[f64], mismatch_fp: &Vec<Vec<f64>>| -> f64 {
+            let calculate_likelihood = |_theta: &[f64], mismatch_fp: &Vec<Vec<f64>>| -> f64 {
                 let mut likelihood = 0.0;
                 for i in 0..num_reads {
                     let row_sum: f64 = mismatch_fp[i].iter().sum();
@@ -593,12 +593,10 @@ impl HaplotypeEstimationProblem {
                 if rsq.sqrt() < tol {
                     // theta_0 and theta_1 tolerance - use theta_1 results
                     theta_new.copy_from_slice(&theta_1);
-                    mismatch_fp_new = mismatch_fp_1.clone();
                     break;
                 } else if v2sq.sqrt() < tol {
                     // theta_1 and theta_2 tolerance - use theta_2 results
                     theta_new.copy_from_slice(&theta_2);
-                    mismatch_fp_new = mismatch_fp_2.clone();
                     break;
                 }
 

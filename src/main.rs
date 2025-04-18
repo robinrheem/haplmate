@@ -10,8 +10,6 @@ use tracing::{debug, info, trace};
 use tracing_subscriber;
 
 use clap::Parser;
-use sprs::indexing::SpIndex;
-use sprs::{CsMat, TriMat};
 
 /// Estimating haplotypes with Simulated Annealing and Expectation-Maximization
 #[derive(Debug, Parser)]
@@ -429,163 +427,287 @@ impl HaplotypeEstimationProblem {
     ) -> Result<(), anyhow::Error> {
         // Create a cache for mismatch counts between reads and haplotypes
         let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
-        // Helper function to calculate likelihood from sparse matrices
-        let calculate_likelihood = |mismatch_fp_mat: &CsMat<f64>, num_reads: usize| -> f64 {
-            let mut likelihood = 0.0;
-            for i in 0..num_reads {
-                let row_sum: f64 = mismatch_fp_mat
-                    .outer_view(i)
-                    .unwrap()
-                    .iter()
-                    .map(|(_, &val)| val)
-                    .sum();
-                if row_sum > 0.0 {
-                    likelihood += row_sum.ln();
-                }
-            }
-            likelihood
-        };
+
+        // Process each sample independently
         for sample in &self.samples {
             let sample_reads: Vec<&Read> =
                 self.reads.iter().filter(|r| r.sample == *sample).collect();
+
             let num_reads = sample_reads.len();
             let num_haps = haplotypes.len();
-            // Initialize theta vectors (these remain dense since they're small)
-            let mut theta_old = vec![1.0 / num_haps as f64; num_haps];
-            let mut theta_new = vec![0.0; num_haps];
-            let mut theta_2 = vec![0.0; num_haps]; // Added for square EM
 
-            // Create sparse matrices instead of dense ones
-            let mut mismatches_triplet = TriMat::new((num_reads, num_haps));
-            // Calculate initial mismatches
+            if num_haps <= 1 {
+                // For single haplotype, set frequency to 1.0
+                if num_haps == 1 {
+                    haplotypes[0].frequencies.insert(sample.clone(), 1.0);
+                }
+                continue;
+            }
+
+            // Initialize frequencies uniformly if not already set
+            // Using the same minimum frequency logic as C code (0.01)
+            let mut theta_new = vec![0.0; num_haps];
+            for (j, hap) in haplotypes.iter().enumerate() {
+                theta_new[j] = match hap.frequencies.get(sample) {
+                    Some(&freq) if freq >= 0.01 => freq,
+                    _ => 0.01, // Initialize with small probability as in C code
+                };
+            }
+
+            // Normalize initial frequencies to sum to 1.0
+            let sum: f64 = theta_new.iter().sum();
+            if sum > 0.0 {
+                for val in theta_new.iter_mut() {
+                    *val /= sum;
+                }
+            }
+
+            // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
+            let mut mismatches = vec![vec![0.0; num_haps]; num_reads];
             for (i, read) in sample_reads.iter().enumerate() {
-                for (j, haplotype) in haplotypes.iter().enumerate() {
-                    // Use cached mismatch count or calculate and cache it
+                for (j, hap) in haplotypes.iter().enumerate() {
                     let mismatch_count = *mismatch_cache.entry((i, j)).or_insert_with(|| {
                         read.sequence
                             .iter()
-                            .zip(&haplotype.sequence)
+                            .zip(&hap.sequence)
                             .filter(|(&r, &h)| r != h && r != b'-')
                             .count()
                     });
 
-                    let prob = self.mismatch_probability(mismatch_count, read.sequence.len());
-                    if prob > 0.0 {
-                        mismatches_triplet.add_triplet(i, j, prob);
-                    }
+                    mismatches[i][j] =
+                        self.mismatch_probability(mismatch_count, read.sequence.len());
                 }
             }
-            // Convert to CSR format for efficient row operations
-            let mismatches_mat = mismatches_triplet.to_csr::<usize>();
-            // Initialize mismatch_fp matrices
-            let mut mismatch_fp_old_triplet = TriMat::new((num_reads, num_haps));
-            // Compute initial mismatch_fp values
+
+            // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
+            let mut mismatch_fp_new = vec![vec![0.0; num_haps]; num_reads];
             for i in 0..num_reads {
-                if let Some(row) = mismatches_mat.outer_view(i) {
-                    for (j, &val) in row.iter() {
-                        mismatch_fp_old_triplet.add_triplet(
-                            i,
-                            j.index(),
-                            val * theta_old[j.index()],
-                        );
-                    }
+                for j in 0..num_haps {
+                    mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
                 }
             }
-            let mut mismatch_fp_old = mismatch_fp_old_triplet.to_csr::<usize>();
-            let mut mismatch_fp_new: CsMat<f64>;
-            let mut mismatch_fp_2: CsMat<f64> = CsMat::zero((num_reads, num_haps));
-            let mut likelihood_old = 0.0;
-            let mut likelihood_new;
-            // EM iterations
-            for _ in 0..self.em_iterations {
-                // Create a new TriMat for E-step since we can't clear existing ones
-                let mut mismatch_fp_new_triplet = TriMat::new((num_reads, num_haps));
-                // E-step: Calculate expected values of latent variables
+
+            // SQUAREM algorithm parameters, matching C code
+            let step_min = 1.0;
+            let mut step_max = 1.0;
+            let step_max_d = 1.0;
+            let mstep = 4.0;
+            let tol = self.em_convergence_delta * 0.1; // Same scaling as in C
+            let lik_increase = 0.0;
+
+            // Create intermediate vectors for SQUAREM
+            let mut theta_1 = vec![0.0; num_haps];
+            let mut theta_2 = vec![0.0; num_haps];
+            let mut r = vec![0.0; num_haps];
+            let mut v = vec![0.0; num_haps];
+
+            // Create intermediate matrices for SQUAREM
+            let mut mismatch_fp_1 = vec![vec![0.0; num_haps]; num_reads];
+            let mut mismatch_fp_2 = vec![vec![0.0; num_haps]; num_reads];
+
+            // EM update closure - equivalent to sqEMUpdate in C
+            let em_update = |theta_in: &[f64],
+                             mismatch_fp_in: &Vec<Vec<f64>>,
+                             theta_out: &mut [f64],
+                             mismatch_fp_out: &mut Vec<Vec<f64>>| {
+                // Temporary holding for membership probabilities
+                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
+
+                // E-step: Calculate memberships (normalized probabilities)
                 for i in 0..num_reads {
-                    if let Some(row) = mismatch_fp_old.outer_view(i) {
-                        let sum: f64 = row.iter().map(|(_, &val)| val).sum();
-                        if sum > 0.0 {
-                            // For non-zero sum, normalize the row
-                            for (j, &val) in row.iter() {
-                                mismatch_fp_new_triplet.add_triplet(i, j.index(), val / sum);
-                            }
+                    let denom: f64 = mismatch_fp_in[i].iter().sum();
+                    if denom > 0.0 {
+                        for j in 0..num_haps {
+                            memberships[i][j] = mismatch_fp_in[i][j] / denom;
                         }
                     }
                 }
-                mismatch_fp_new = mismatch_fp_new_triplet.to_csr::<usize>();
-                // M-step: Update parameters (theta_new) based on expectations
+
+                // M-step: Update frequencies based on memberships
                 for j in 0..num_haps {
-                    // Sum column j of mismatch_fp_new
-                    let col_sum: f64 = (0..num_reads)
-                        .filter_map(|i| mismatch_fp_new.get(i, j))
-                        .sum();
+                    theta_out[j] = 0.0;
+                    for i in 0..num_reads {
+                        theta_out[j] += memberships[i][j];
+                    }
+                    theta_out[j] /= num_reads as f64;
 
-                    theta_new[j] = col_sum / num_reads as f64;
-                }
-
-                // Create a new triplet for next iteration
-                let mut next_fp_triplet = TriMat::new((num_reads, num_haps));
-
-                // Update mismatch_fp for next iteration
-                for i in 0..num_reads {
-                    if let Some(row) = mismatches_mat.outer_view(i) {
-                        for (j, &val) in row.iter() {
-                            let j_idx = j.index();
-                            if theta_new[j_idx] > 0.0 {
-                                next_fp_triplet.add_triplet(i, j_idx, val * theta_new[j_idx]);
-                            }
-                        }
+                    // Update mismatch_fp with new frequencies
+                    for i in 0..num_reads {
+                        mismatch_fp_out[i][j] = mismatches[i][j] * theta_out[j];
                     }
                 }
-                mismatch_fp_new = next_fp_triplet.to_csr::<usize>();
-                // Calculate likelihood and check convergence
-                likelihood_new = calculate_likelihood(&mismatch_fp_new, num_reads);
-                if likelihood_new <= likelihood_old - 1e-5 {
-                    // Revert to theta_2 if likelihood decreases
+            };
+
+            // Calculate likelihood closure - equivalent to EM_likelihood_sq in C
+            let calculate_likelihood = |theta: &[f64], mismatch_fp: &Vec<Vec<f64>>| -> f64 {
+                let mut likelihood = 0.0;
+                for i in 0..num_reads {
+                    let row_sum: f64 = mismatch_fp[i].iter().sum();
+                    if row_sum > 0.0 {
+                        likelihood += row_sum.ln();
+                    }
+                }
+                likelihood
+            };
+
+            // Initial likelihood calculation
+            let mut likelihood_old = calculate_likelihood(&theta_new, &mismatch_fp_new);
+            let mut likelihood_new = likelihood_old;
+            let mut iters = 0;
+
+            // Main SQUAREM loop
+            while iters < self.em_iterations {
+                // Update likelihood_old if new one is valid
+                if !likelihood_new.is_infinite() && !likelihood_new.is_nan() {
+                    likelihood_old = likelihood_new;
+                }
+
+                // First EM update: theta_0 -> theta_1
+                em_update(
+                    &theta_new,
+                    &mismatch_fp_new,
+                    &mut theta_1,
+                    &mut mismatch_fp_1,
+                );
+
+                // Second EM update: theta_1 -> theta_2
+                em_update(&theta_1, &mismatch_fp_1, &mut theta_2, &mut mismatch_fp_2);
+
+                iters += 2;
+
+                // Calculate step vectors and norms
+                let mut rsq = 0.0;
+                let mut vsq = 0.0;
+                let mut v2sq = 0.0;
+
+                for j in 0..num_haps {
+                    r[j] = theta_1[j] - theta_new[j];
+                    rsq += r[j] * r[j];
+                    v[j] = (theta_2[j] - theta_1[j]) - r[j];
+                    vsq += v[j] * v[j];
+                    v2sq += (theta_2[j] - theta_1[j]) * (theta_2[j] - theta_1[j]);
+                }
+
+                // Early convergence check based on tolerance
+                if rsq.sqrt() < tol {
+                    // theta_0 and theta_1 tolerance
+                    // Use theta_1 results
+                    theta_new.copy_from_slice(&theta_1);
+                    mismatch_fp_new = mismatch_fp_1.clone();
+                    break;
+                } else if v2sq.sqrt() < tol {
+                    // theta_1 and theta_2 tolerance
+                    // Use theta_2 results
                     theta_new.copy_from_slice(&theta_2);
                     mismatch_fp_new = mismatch_fp_2.clone();
-                    likelihood_new = calculate_likelihood(&mismatch_fp_new, num_reads);
-                }
-                if (likelihood_new - likelihood_old).abs() < self.em_convergence_delta {
-                    // Store final frequencies
-                    for (j, haplotype) in haplotypes.iter_mut().enumerate() {
-                        if theta_new[j] >= 0.001 {
-                            haplotype.frequencies.insert(sample.clone(), theta_new[j]);
-                        } else {
-                            haplotype.frequencies.insert(sample.clone(), 0.0);
-                        }
-                    }
                     break;
                 }
-                // Update for next iteration
-                likelihood_old = likelihood_new;
-                theta_2.copy_from_slice(&theta_old);
-                theta_old.copy_from_slice(&theta_new);
-                mismatch_fp_2 = mismatch_fp_old;
-                mismatch_fp_old = mismatch_fp_new;
+
+                // SQUAREM acceleration step
+                let alpha = if vsq > 0.0 {
+                    f64::max(step_min, f64::min(step_max, -((rsq / vsq).sqrt())))
+                } else {
+                    1.0 // Fallback to standard EM
+                };
+
+                // Compute accelerated parameter estimates
+                for j in 0..num_haps {
+                    theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
+
+                    // Update mismatch_fp_new with new theta values
+                    for i in 0..num_reads {
+                        mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
+                    }
+                }
+
+                // Stabilization step if alpha far from 1.0
+                if (alpha - 1.0).abs() > 0.01 {
+                    // Create temporary copies to avoid borrowing conflict
+                    let theta_temp = theta_new.clone();
+                    let mismatch_fp_temp = mismatch_fp_new.clone();
+                    em_update(
+                        &theta_temp,
+                        &mismatch_fp_temp,
+                        &mut theta_new,
+                        &mut mismatch_fp_new,
+                    );
+                    iters += 1;
+                }
+
+                // Calculate new likelihood
+                likelihood_new = calculate_likelihood(&theta_new, &mismatch_fp_new);
+
+                // If likelihood decreased, revert to theta_2
+                if likelihood_new.is_infinite()
+                    || likelihood_new.is_nan()
+                    || likelihood_new <= likelihood_old - lik_increase
+                {
+                    // Copy theta_2 to theta_new
+                    theta_new.copy_from_slice(&theta_2);
+
+                    // Recalculate mismatch_fp_new from theta_new
+                    for i in 0..num_reads {
+                        for j in 0..num_haps {
+                            mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
+                        }
+                    }
+
+                    // Update likelihood
+                    likelihood_new = calculate_likelihood(&theta_new, &mismatch_fp_new);
+
+                    // Adjust step_max if at boundary
+                    if alpha == step_max {
+                        step_max = f64::max(step_max_d, step_max / mstep);
+                    }
+
+                    // Reset alpha
+                    // alpha = 1.0; (Not needed as this value isn't used again)
+                }
+
+                // Increase step_max if we're hitting its boundary
+                if alpha == step_max {
+                    step_max = mstep * step_max;
+                }
+
+                // Check for convergence
+                if (likelihood_new - likelihood_old).abs() <= self.em_convergence_delta {
+                    break;
+                }
+            }
+
+            // Store final frequencies, filtering out those < 0.5% (0.005) as in C code
+            for (j, haplotype) in haplotypes.iter_mut().enumerate() {
+                if theta_new[j].is_nan() || theta_new[j] < 0.005 {
+                    haplotype.frequencies.insert(sample.clone(), 0.0);
+                } else {
+                    haplotype.frequencies.insert(sample.clone(), theta_new[j]);
+                }
             }
         }
+
         // Remove haplotypes with zero frequencies across all samples
         let mut indices_to_remove = Vec::new();
         for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
-            let mut has_nonzero = false;
+            let mut non_zero = false;
             for sample in &self.samples {
                 if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    if !freq.is_nan() && freq >= 0.001 {
-                        has_nonzero = true;
+                    if !freq.is_nan() && freq >= 0.005 {
+                        non_zero = true;
                         break;
                     }
                 }
             }
-            if !has_nonzero {
+            if !non_zero {
                 indices_to_remove.push(hap_idx);
             }
         }
+
         // Remove haplotypes in reverse order to maintain correct indices
         for &idx in indices_to_remove.iter().rev() {
             haplotypes.remove(idx);
         }
-        // Rescale frequencies to sum to 1.0 for each sample
+
+        // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
         for sample in &self.samples {
             let mut sum = 0.0;
             for haplotype in haplotypes.iter() {
@@ -601,6 +723,7 @@ impl HaplotypeEstimationProblem {
                 }
             }
         }
+
         Ok(())
     }
 

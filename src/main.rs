@@ -590,32 +590,69 @@ impl HaplotypeEstimationProblem {
 
                 // Early convergence check based on tolerance
                 if rsq.sqrt() < tol {
-                    // theta_0 and theta_1 tolerance
-                    // Use theta_1 results
+                    // theta_0 and theta_1 tolerance - use theta_1 results
                     theta_new.copy_from_slice(&theta_1);
                     mismatch_fp_new = mismatch_fp_1.clone();
                     break;
                 } else if v2sq.sqrt() < tol {
-                    // theta_1 and theta_2 tolerance
-                    // Use theta_2 results
+                    // theta_1 and theta_2 tolerance - use theta_2 results
                     theta_new.copy_from_slice(&theta_2);
                     mismatch_fp_new = mismatch_fp_2.clone();
                     break;
                 }
 
-                // SQUAREM acceleration step
+                // SQUAREM acceleration step - carefully follow C implementation
                 let alpha = if vsq > 0.0 {
                     f64::max(step_min, f64::min(step_max, -((rsq / vsq).sqrt())))
                 } else {
                     1.0 // Fallback to standard EM
                 };
 
-                // Compute accelerated parameter estimates
+                // Compute accelerated parameter estimates - following C logic
+                // Directly update frequencies first without updating mismatch_fp
                 for j in 0..num_haps {
                     theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
+                }
 
-                    // Update mismatch_fp_new with new theta values
-                    for i in 0..num_reads {
+                // Normalization step to make sure frequencies are valid
+                // This was missing in our original implementation but present in C code
+                let mut sum = 0.0;
+                let mut has_negative = false;
+
+                // First check for negatives and sum
+                for &val in &theta_new {
+                    if val < 0.0 {
+                        has_negative = true;
+                    }
+                    sum += f64::max(0.0, val); // Only sum non-negative values
+                }
+
+                // Handle negative frequencies by setting to small value
+                if has_negative {
+                    for val in &mut theta_new {
+                        if *val < 0.0 {
+                            *val = 0.01; // Set negative values to small positive value
+                        }
+                    }
+                    // Recalculate sum after fixing negatives
+                    sum = theta_new.iter().sum();
+                }
+
+                // Normalize to ensure frequencies sum to 1.0
+                if sum > 0.0 {
+                    for val in &mut theta_new {
+                        *val /= sum;
+                    }
+                } else {
+                    // If all frequencies were negative or zero, use uniform distribution
+                    for val in &mut theta_new {
+                        *val = 1.0 / num_haps as f64;
+                    }
+                }
+
+                // Now update mismatch_fp with normalized frequencies
+                for i in 0..num_reads {
+                    for j in 0..num_haps {
                         mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
                     }
                 }

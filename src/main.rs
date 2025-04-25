@@ -1241,8 +1241,11 @@ fn main() -> Result<()> {
         sa_reruns: args.sa_reruns,
         seed: args.seed,
     };
-    let proposed_haplotypes =
-        propose_haplotypes(&reads, &initial_haplotypes, optimization_parameters);
+    let proposed_haplotypes = propose_haplotypes(
+        &variant_only_reads,
+        &initial_haplotypes,
+        optimization_parameters,
+    );
     // Print CSV headers
     print!("sequence");
     for sample in &args.files {

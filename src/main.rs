@@ -938,7 +938,8 @@ impl CostFunction for HaplotypeEstimationProblem {
                                     .count();
                                 self.mismatch_probability(mismatches, read.sequence.len())
                             });
-                    total_mismatch_probability += probability;
+                    let frequency = haplotype.frequencies.get(*sample).unwrap_or(&0.0);
+                    total_mismatch_probability += probability * frequency;
                 }
                 if total_mismatch_probability > 0.0 {
                     total_cost -= total_mismatch_probability.ln();

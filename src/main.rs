@@ -83,6 +83,7 @@ struct OptimizationParameters {
     sa_iterations: usize,
     sa_reruns: usize,
     em_cdelta: f64,
+    original_read_length: usize,
     seed: Option<u64>,
 }
 
@@ -348,6 +349,7 @@ struct HaplotypeEstimationProblem {
     em_max_mismatches: usize,
     em_iterations: usize,
     em_convergence_delta: f64,
+    original_read_length: usize,
     seed: Option<u64>,
 }
 
@@ -365,11 +367,11 @@ impl HaplotypeEstimationProblem {
     /// The probability of observing exactly `mismatches` number of mismatches in a sequence
     /// of length `sequence_length`, given the error rate. Returns 0.0 if mismatches exceed
     /// the maximum allowed mismatches or if creating the binomial distribution fails.
-    fn mismatch_probability(&self, mismatches: usize, sequence_length: usize) -> f64 {
+    fn mismatch_probability(&self, mismatches: usize) -> f64 {
         if mismatches > self.em_max_mismatches {
             return 0.0;
         }
-        match Binomial::new(self.error_rate, sequence_length as u64) {
+        match Binomial::new(self.error_rate, self.original_read_length as u64) {
             Ok(binomial) => binomial.pmf(mismatches as u64),
             Err(_) => {
                 eprintln!("Failed to create binomial distribution");
@@ -474,8 +476,7 @@ impl HaplotypeEstimationProblem {
                             .count()
                     });
 
-                    mismatches[i][j] =
-                        self.mismatch_probability(mismatch_count, read.sequence.len());
+                    mismatches[i][j] = self.mismatch_probability(mismatch_count);
                 }
             }
 
@@ -936,7 +937,7 @@ impl CostFunction for HaplotypeEstimationProblem {
                                     .zip(&haplotype.sequence)
                                     .filter(|(&r, &h)| r != h && r != b'-')
                                     .count();
-                                self.mismatch_probability(mismatches, read.sequence.len())
+                                self.mismatch_probability(mismatches)
                             });
                     let frequency = haplotype.frequencies.get(*sample).unwrap_or(&0.0);
                     total_mismatch_probability += probability * frequency;
@@ -1198,6 +1199,7 @@ fn propose_haplotypes(
         em_max_mismatches: optimization_parameters.max_mismatches,
         em_iterations: optimization_parameters.em_iterations,
         em_convergence_delta: optimization_parameters.em_cdelta,
+        original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
     };
     let rng = if let Some(seed) = optimization_parameters.seed {
@@ -1277,6 +1279,7 @@ fn main() -> Result<()> {
         sa_iterations: args.sa_iterations,
         sa_max_temperature: args.sa_max_temperature,
         sa_reruns: args.sa_reruns,
+        original_read_length: reads[0].sequence.len(),
         seed: args.seed,
     };
     let proposed_haplotypes = propose_haplotypes(

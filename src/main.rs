@@ -22,7 +22,7 @@ struct Args {
     #[arg(short = 'm', long, default_value = "15")]
     mismatches: usize,
     /// Maximum number of EM iterations during intermediate steps
-    #[arg(short, long, default_value = "20")]
+    #[arg(short, long, default_value = "20000")]
     em_iterations: usize,
     /// Strength of annealing
     #[arg(long, default_value = "0.1")]

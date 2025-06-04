@@ -52,7 +52,7 @@ struct Args {
     #[arg(long, default_value = "5")]
     sa_reruns: usize,
     /// Delta to determine intermediate EM convergence steps
-    #[arg(long, default_value = "0.5")]
+    #[arg(long, default_value = "0.1")]
     em_cdelta: f64,
     /// Random seed for deterministic output(testing purposes only)
     #[arg(long)]
@@ -349,6 +349,7 @@ struct HaplotypeEstimationProblem {
     em_max_mismatches: usize,
     em_iterations: usize,
     em_convergence_delta: f64,
+    sa_max_temperature: f64,
     original_read_length: usize,
     seed: Option<u64>,
 }
@@ -426,6 +427,7 @@ impl HaplotypeEstimationProblem {
     fn square_expectation_maximization(
         &self,
         haplotypes: &mut Vec<Haplotype>,
+        convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
         // Create a cache for mismatch counts between reads and haplotypes
         let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
@@ -496,7 +498,7 @@ impl HaplotypeEstimationProblem {
             let mut step_max = 1.0;
             let step_max_d = 1.0;
             let mstep = 4.0;
-            let tol = self.em_convergence_delta * 0.1; // Same scaling as in C
+            let tol = convergence_delta * 0.1; // Same scaling as in C
             let lik_increase = 0.0; // original: 1.0
 
             // Create intermediate vectors for SQUAREM
@@ -1087,8 +1089,11 @@ impl Anneal for HaplotypeEstimationProblem {
             new_haplotypes.len()
         );
         // Mutate haplotype frequencies with and zero-out with Square EM
-        self.square_expectation_maximization(&mut new_haplotypes)?;
-
+        let em_temp_end = 0.00001;
+        let sa_progress = temp / self.sa_max_temperature;
+        let convergence_delta =
+            em_temp_end + (self.em_convergence_delta - em_temp_end) * sa_progress;
+        self.square_expectation_maximization(&mut new_haplotypes, convergence_delta)?;
         debug!(
             "Annealing step complete, returning {} haplotypes",
             new_haplotypes.len()
@@ -1122,6 +1127,7 @@ fn propose_haplotypes(
         em_max_mismatches: optimization_parameters.max_mismatches,
         em_iterations: optimization_parameters.em_iterations,
         em_convergence_delta: optimization_parameters.em_cdelta,
+        sa_max_temperature: optimization_parameters.sa_max_temperature,
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
     };
@@ -1273,6 +1279,8 @@ mod tests {
             em_max_mismatches: 3,
             em_iterations: 100,
             em_convergence_delta: 0.001,
+            sa_max_temperature: 10.0,
+            original_read_length: 100,
             seed: Some(12345),
         }
     }

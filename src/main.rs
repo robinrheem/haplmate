@@ -693,6 +693,201 @@ impl HaplotypeEstimationProblem {
         Ok(())
     }
 
+    fn expectation_maximization(
+        &self,
+        haplotypes: &mut Vec<Haplotype>,
+        convergence_delta: f64,
+    ) -> Result<(), anyhow::Error> {
+        // Create a cache for mismatch counts between reads and haplotypes
+        let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
+
+        for sample in &self.samples {
+            let sample_reads: Vec<&Read> =
+                self.reads.iter().filter(|r| r.sample == *sample).collect();
+            let num_reads = sample_reads.len();
+            let num_haps = haplotypes.len();
+            let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
+                let mut likelihood = 0.0;
+                for i in 0..num_reads {
+                    let row_sum: f64 = mismatch_fp[i].iter().sum();
+                    if row_sum > 0.0 {
+                        likelihood += row_sum.ln();
+                    }
+                }
+                likelihood
+            };
+
+            if num_haps <= 1 {
+                // For single haplotype, set frequency to 1.0
+                if num_haps == 1 {
+                    haplotypes[0].frequencies.insert(sample.clone(), 1.0);
+                }
+                continue;
+            }
+
+            // Initialize frequencies uniformly if not already set
+            let mut theta: Vec<f64> = haplotypes
+                .iter()
+                .map(|hap| match hap.frequencies.get(sample) {
+                    Some(&freq) if freq >= 0.01 => freq,
+                    _ => 0.01,
+                })
+                .collect();
+
+            // Normalize initial frequencies to sum to 1.0
+            let sum: f64 = theta.iter().sum();
+            if sum > 0.0 {
+                for val in theta.iter_mut() {
+                    *val /= sum;
+                }
+            }
+
+            // Pre-calculate mismatch probabilities
+            let mismatches: Vec<Vec<f64>> = sample_reads
+                .iter()
+                .enumerate()
+                .map(|(i, read)| {
+                    haplotypes
+                        .iter()
+                        .enumerate()
+                        .map(|(j, hap)| {
+                            let count = *mismatch_cache.entry((i, j)).or_insert_with(|| {
+                                read.sequence
+                                    .iter()
+                                    .zip(&hap.sequence)
+                                    .filter(|(&r, &h)| r != h && r != b'-')
+                                    .count()
+                            });
+                            self.mismatch_probability(count)
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
+            let mut mismatch_fp_new: Vec<Vec<f64>> = mismatches
+                .iter()
+                .map(|row| row.iter().zip(&theta).map(|(&m, &t)| m * t).collect())
+                .collect();
+
+            // Calculate initial likelihood
+            let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
+            let mut iters = 0;
+
+            // Main EM loop
+            while iters < self.em_iterations {
+                let theta_old = theta.clone();
+                // Temporary holding for membership probabilities
+                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
+                // E-step: Calculate memberships (normalized probabilities)
+                for i in 0..num_reads {
+                    let denom: f64 = mismatches[i].iter().sum();
+                    if denom > 0.0 {
+                        for j in 0..num_haps {
+                            memberships[i][j] = mismatches[i][j] / denom;
+                        }
+                    }
+                }
+                // M-step: Update frequencies based on memberships
+                for j in 0..num_haps {
+                    theta[j] = 0.0;
+                    for i in 0..num_reads {
+                        theta[j] += memberships[i][j];
+                    }
+                    theta[j] /= num_reads as f64;
+
+                    // Ensure minimum probability
+                    theta[j] = f64::max(1e-10, theta[j]);
+                    for i in 0..num_reads {
+                        mismatch_fp_new[i][j] = mismatches[i][j] * theta[j];
+                    }
+                }
+                // Normalize to sum to 1.0
+                let sum: f64 = theta.iter().sum();
+                if sum > 0.0 {
+                    for val in theta.iter_mut() {
+                        *val /= sum;
+                    }
+                }
+                // Calculate new likelihood
+                let likelihood_new = calculate_likelihood(&mismatch_fp_new);
+
+                // Check for convergence
+                let converged = if likelihood_old.abs() > 1e-10 {
+                    // Use relative convergence criterion
+                    ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
+                        < convergence_delta
+                } else {
+                    // Use absolute convergence criterion for small likelihoods
+                    (likelihood_new - likelihood_old).abs() < convergence_delta
+                };
+
+                if converged {
+                    break;
+                }
+
+                // Check for parameter convergence as backup
+                let param_change: f64 = theta
+                    .iter()
+                    .zip(&theta_old)
+                    .map(|(&new, &old)| (new - old).abs())
+                    .sum();
+
+                if param_change < convergence_delta {
+                    break;
+                }
+
+                likelihood_old = likelihood_new;
+                iters += 1;
+            }
+
+            // Store final frequencies
+            for (j, haplotype) in haplotypes.iter_mut().enumerate() {
+                haplotype.frequencies.insert(sample.clone(), theta[j]);
+            }
+        }
+
+        // Remove haplotypes with zero frequencies across all samples
+        let mut indices_to_remove = Vec::new();
+        for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
+            let mut non_zero = false;
+            for sample in &self.samples {
+                if let Some(&freq) = haplotype.frequencies.get(sample) {
+                    if !freq.is_nan() && freq >= 0.005 {
+                        non_zero = true;
+                        break;
+                    }
+                }
+            }
+            if !non_zero {
+                indices_to_remove.push(hap_idx);
+            }
+        }
+
+        // Remove haplotypes in reverse order to maintain correct indices
+        for &idx in indices_to_remove.iter().rev() {
+            haplotypes.remove(idx);
+        }
+
+        // Rescale frequencies to sum to 1.0 for each sample
+        for sample in &self.samples {
+            let mut sum = 0.0;
+            for haplotype in haplotypes.iter() {
+                if let Some(&freq) = haplotype.frequencies.get(sample) {
+                    sum += freq;
+                }
+            }
+            if sum > 0.0 {
+                for haplotype in haplotypes.iter_mut() {
+                    if let Some(freq) = haplotype.frequencies.get_mut(sample) {
+                        *freq /= sum;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
     /// Calculates the minimum number of recombination events required to explain the given set of haplotypes
     /// using the Four Gamete Test (FGT) method.
     ///
@@ -1096,7 +1291,7 @@ impl Anneal for HaplotypeEstimationProblem {
         let sa_progress = temp / self.sa_max_temperature;
         let convergence_delta =
             em_temp_end + (self.em_convergence_delta - em_temp_end) * sa_progress;
-        self.square_expectation_maximization(&mut new_haplotypes, convergence_delta)?;
+        self.expectation_maximization(&mut new_haplotypes, convergence_delta)?;
         debug!(
             "Annealing step complete, returning {} haplotypes",
             new_haplotypes.len()

@@ -215,10 +215,8 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         let mut queue: VecDeque<Vec<u8>> = VecDeque::new();
         queue.push_back(vec![]);
         // Expand blanks iteratively
-        for (pos, &nucleotide) in read.sequence.iter().enumerate() {
+        for &nucleotide in read.sequence.iter() {
             let mut level_size = queue.len();
-            trace!("Position {}: expanding {} sequences", pos, level_size);
-
             while level_size > 0 {
                 level_size -= 1;
                 let mut current = queue.pop_front().unwrap();

@@ -1169,64 +1169,40 @@ impl Anneal for HaplotypeEstimationProblem {
                         attempts += 1;
                         continue;
                     }
-                    // Check if sequences are different enough to recombine
-                    let mismatches = new_haplotypes[idx1]
-                        .sequence
-                        .iter()
-                        .zip(&new_haplotypes[idx2].sequence)
-                        .filter(|(&a, &b)| a != b)
-                        .count();
-
-                    trace!(
-                        "Attempt {}: Found {} mismatches between haplotypes {} and {}",
-                        attempts + 1,
-                        mismatches,
-                        idx1,
-                        idx2
+                    let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
+                    debug!(
+                        "Performing recombination at position {} between haplotypes {} and {}",
+                        crossover_point, idx1, idx2
                     );
-
-                    // Only recombine if sequences differ by at least 2 positions
-                    if mismatches >= 2 {
-                        let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
-                        debug!(
-                            "Performing recombination at position {} between haplotypes {} and {}",
-                            crossover_point, idx1, idx2
-                        );
-
-                        let mut recombined1 = new_haplotypes[idx1].sequence.clone();
-                        let mut recombined2 = new_haplotypes[idx2].sequence.clone();
-                        recombined1[crossover_point..]
-                            .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
-                        recombined2[crossover_point..]
-                            .copy_from_slice(&new_haplotypes[idx1].sequence[crossover_point..]);
-                        let mut new_sequences = Vec::new();
-                        if !new_haplotypes.iter().any(|h| h.sequence == recombined1) {
-                            trace!("Adding first recombined sequence");
-                            new_sequences.push(recombined1);
-                        }
-                        if !new_haplotypes.iter().any(|h| h.sequence == recombined2) {
-                            trace!("Adding second recombined sequence");
-                            new_sequences.push(recombined2);
-                        }
-
-                        debug!("Generated {} new unique sequences", new_sequences.len());
-
-                        for new_seq in new_sequences {
-                            let mut combined_frequencies = HashMap::new();
-                            for (sample, &freq1) in &new_haplotypes[idx1].frequencies {
-                                let freq2 =
-                                    new_haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
-                                combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
-                            }
-                            new_haplotypes.push(Haplotype {
-                                sequence: new_seq,
-                                frequencies: combined_frequencies,
-                            });
-                        }
-                        break;
+                    let mut recombined1 = new_haplotypes[idx1].sequence.clone();
+                    let mut recombined2 = new_haplotypes[idx2].sequence.clone();
+                    recombined1[crossover_point..]
+                        .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
+                    recombined2[crossover_point..]
+                        .copy_from_slice(&new_haplotypes[idx1].sequence[crossover_point..]);
+                    let mut new_sequences = Vec::new();
+                    if !new_haplotypes.iter().any(|h| h.sequence == recombined1) {
+                        trace!("Adding first recombined sequence");
+                        new_sequences.push(recombined1);
                     }
-                    attempts += 1;
-                    idx2 = rng.gen_range(0..new_haplotypes.len());
+                    if !new_haplotypes.iter().any(|h| h.sequence == recombined2) {
+                        trace!("Adding second recombined sequence");
+                        new_sequences.push(recombined2);
+                    }
+                    debug!("Generated {} new unique sequences", new_sequences.len());
+                    for new_seq in new_sequences {
+                        let mut combined_frequencies = HashMap::new();
+                        for (sample, &freq1) in &new_haplotypes[idx1].frequencies {
+                            let freq2 =
+                                new_haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
+                            combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
+                        }
+                        new_haplotypes.push(Haplotype {
+                            sequence: new_seq,
+                            frequencies: combined_frequencies,
+                        });
+                    }
+                    break;
                 }
             }
             2 if new_haplotypes.len() < self.reads.len() => {
@@ -1260,28 +1236,6 @@ impl Anneal for HaplotypeEstimationProblem {
                 trace!("No operation performed - conditions not met");
             }
         }
-
-        // Scale mutations based on temperature
-        if temp > 0.0 && rng.gen::<f64>() < temp {
-            // Additional random mutation when temperature is high
-            debug!(
-                "Performing additional temperature-based mutation (temp: {})",
-                temp
-            );
-            if let Some(idx) = (0..new_haplotypes.len()).choose(&mut rng) {
-                let haplotype = &mut new_haplotypes[idx];
-                let pos = rng.gen_range(0..haplotype.sequence.len());
-                let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
-                trace!(
-                    "Temperature mutation: haplotype {} at position {} to {}",
-                    idx,
-                    pos,
-                    new_nucleotide as char
-                );
-                haplotype.sequence[pos] = new_nucleotide;
-            }
-        }
-
         debug!(
             "Running EM optimization on {} haplotypes",
             new_haplotypes.len()

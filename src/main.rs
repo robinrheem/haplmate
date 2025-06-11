@@ -592,11 +592,16 @@ impl HaplotypeEstimationProblem {
                 }
 
                 // SQUAREM acceleration step - carefully follow C implementation
-                let mut alpha = f64::max(step_min, f64::min(step_max, ((rsq / vsq).sqrt())));
+                let mut alpha = f64::max(step_min, f64::min(step_max, (rsq / vsq).sqrt()));
+                if alpha.is_nan() || alpha.is_infinite() {
+                    alpha = 1.0; // Fallback to regular EM step
+                }
                 // Compute accelerated parameter estimates - following C logic
                 // Directly update frequencies first without updating mismatch_fp
                 for j in 0..num_haps {
                     theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
+                    // Parameter projection
+                    theta_new[j] = f64::max(0.01, theta_new[j]);
                     for i in 0..num_reads {
                         mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
                     }

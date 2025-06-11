@@ -592,7 +592,7 @@ impl HaplotypeEstimationProblem {
                 }
 
                 // SQUAREM acceleration step - carefully follow C implementation
-                let mut alpha = f64::max(step_min, f64::min(step_max, -((rsq / vsq).sqrt())));
+                let mut alpha = f64::max(step_min, f64::min(step_max, ((rsq / vsq).sqrt())));
                 // Compute accelerated parameter estimates - following C logic
                 // Directly update frequencies first without updating mismatch_fp
                 for j in 0..num_haps {

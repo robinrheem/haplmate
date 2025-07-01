@@ -28,13 +28,13 @@ struct Args {
     #[arg(long, default_value = "0.1")]
     sa_schedule: f64,
     /// Lambda1 value (for testing purposes only)
-    #[arg(long, default_value = "0.1")]
+    #[arg(long, default_value = "0.0001")]
     lambda1: f64,
     /// Lambda2 value (for testing purposes only)
-    #[arg(long, default_value = "0.1")]
+    #[arg(long, default_value = "0.0001")]
     lambda2: f64,
     /// Sequencing error
-    #[arg(short = 'd', long, default_value = "0.04")]
+    #[arg(short = 'd', long, default_value = "0.00001")]
     error_rate: f64,
     /// Minimum temp to reach in simulated annealing
     #[arg(long, default_value = "0.0")]
@@ -43,7 +43,7 @@ struct Args {
     #[arg(long, default_value = "10.0")]
     sa_max_temperature: f64,
     /// Number of iterations in simulated annealing
-    #[arg(long, default_value = "500")]
+    #[arg(long, default_value = "2000")]
     sa_iterations: usize,
     /// Interval between calling EM
     #[arg(long, default_value = "10")]

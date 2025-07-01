@@ -246,12 +246,10 @@ fn test_multiple_samples() -> Result<()> {
         .arg(sample2_path)
         .arg(sample3_path)
         .arg("--sa-reruns=1")
-        .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
-        .arg("--lambda1=0.0")
-        .arg("--lambda2=0.0")
-        .arg("--seed=12345")
-        .arg("--error-rate=0.04");
+        .arg("--lambda1=0.1")
+        .arg("--lambda2=0.1")
+        .arg("--seed=12345");
 
     // Run the command and capture output
     let output = cmd.output()?;
@@ -471,17 +469,9 @@ fn test_single_sample_with_gaps() -> Result<()> {
 
     let mut cmd = Command::cargo_bin("haplmate")?;
     cmd.arg(sample_path)
-        .arg("--sa-reruns=1")
-        .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
         .arg("--sa-min-temperature=0.0")
-        .arg("--sa-schedule=0.1")
-        .arg("--em-interval=10")
-        .arg("--em-cdelta=0.5")
-        .arg("--lambda1=0.0")
-        .arg("--lambda2=0.0")
-        .arg("--seed=12345")
-        .arg("--error-rate=0.04");
+        .arg("--seed=12345");
 
     let output = cmd.output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -573,16 +563,11 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
         cmd.arg(path);
     }
     cmd.arg("--sa-reruns=1")
-        .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
         .arg("--sa-min-temperature=0.0")
-        .arg("--sa-schedule=0.1")
-        .arg("--em-interval=10")
-        .arg("--em-cdelta=0.5")
-        .arg("--lambda1=0.0")
-        .arg("--lambda2=0.0")
-        .arg("--seed=12345")
-        .arg("--error-rate=0.04");
+        .arg("--lambda1=0.001")
+        .arg("--lambda2=0.001")
+        .arg("--seed=12345");
 
     let output = cmd.output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -660,13 +645,10 @@ fn test_sample_haplotypes() -> Result<()> {
     // Run with deterministic parameters
     let mut cmd = Command::cargo_bin("haplmate")?;
     cmd.arg("tests/data/sample_haplotypes.fa")
-        .arg("--sa-reruns=1")
-        .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
-        .arg("--seed=12345")
-        .arg("--error-rate=0.04");
+        .arg("--seed=12345");
 
     let output = cmd.output()?;
     println!(

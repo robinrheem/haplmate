@@ -18,6 +18,9 @@ struct Args {
     /// Input FASTA file(s)
     #[arg(value_name = "FILE", default_value = "-")]
     files: Vec<String>,
+    /// Output file
+    #[arg(short, long, default_value = "estimated_haplotypes.csv")]
+    output: Option<String>,
     /// Maximum allowed mismatch between haplotypes and reads
     #[arg(short = 'm', long, default_value = "15")]
     mismatches: usize,
@@ -1317,6 +1320,40 @@ fn propose_haplotypes(
     best_haplotypes
 }
 
+fn haplotype_frequencies_output(
+    haplotypes: &Vec<Haplotype>,
+    invariant_positions: &[(usize, u8)],
+    samples: &Vec<String>,
+) -> String {
+    let mut output = String::new();
+    output.push_str("sequence");
+    for sample in samples {
+        output.push_str(&format!(",{}", sample));
+    }
+    output.push('\n');
+    for haplotype in haplotypes {
+        let restored_sequence = restore_invariants(&haplotype.sequence, invariant_positions);
+        output.push_str(&String::from_utf8_lossy(&restored_sequence));
+        for sample in samples {
+            output.push_str(&format!(
+                ",{}",
+                haplotype.frequencies.get(sample).unwrap_or(&0.0)
+            ));
+        }
+        output.push('\n');
+    }
+    output.push_str("SUM");
+    for sample in samples {
+        let sum: f64 = haplotypes
+            .iter()
+            .map(|h| h.frequencies.get(sample).unwrap_or(&0.0))
+            .sum();
+        output.push_str(&format!(",{}", sum));
+    }
+    output.push('\n');
+    output
+}
+
 /// Main function
 ///
 /// TODO: Parallel processing
@@ -1368,31 +1405,12 @@ fn main() -> Result<()> {
         &initial_haplotypes,
         optimization_parameters,
     );
-    // Print CSV headers
-    print!("sequence");
-    for sample in &args.files {
-        print!(",{}", sample);
+    let output =
+        haplotype_frequencies_output(&proposed_haplotypes, &invariant_positions, &args.files);
+    println!("{}", output);
+    if let Some(output_file) = args.output {
+        std::fs::write(output_file, output).unwrap();
     }
-    println!();
-    // Print proposed haplotypes with restored invariant positions
-    for haplotype in &proposed_haplotypes {
-        let restored_sequence = restore_invariants(&haplotype.sequence, &invariant_positions);
-        print!("{}", String::from_utf8_lossy(&restored_sequence));
-        for sample in &args.files {
-            print!(",{}", haplotype.frequencies.get(sample).unwrap_or(&0.0));
-        }
-        println!();
-    }
-    // Print sums as the last row
-    print!("SUM");
-    for sample in &args.files {
-        let sum: f64 = proposed_haplotypes
-            .iter()
-            .map(|h| h.frequencies.get(sample).unwrap_or(&0.0))
-            .sum();
-        print!(",{}", sum);
-    }
-    println!();
     Ok(())
 }
 

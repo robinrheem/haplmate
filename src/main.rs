@@ -209,6 +209,10 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
 ///
 /// List of haplotypes(full sequences) with initial frequencies
 fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
+    if reads.is_empty() {
+        debug!("No reads provided, returning empty haplotype set");
+        return Vec::new();
+    }
     info!("Initializing haplotypes from {} reads", reads.len());
     let sequence_length = reads[0].sequence.len();
     let samples: HashSet<String> = reads.iter().map(|r| r.sample.clone()).collect();
@@ -217,10 +221,8 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
     // Step 1: Create MAF (Major Allele Frequency) haplotype
     // This follows haplotype_Set_InitializeMAF logic
     let mut maf_sequence = vec![0u8; sequence_length];
-
     for pos in 0..sequence_length {
         let mut counts = [0; 4]; // A, C, G, T
-
         for read in reads {
             match read.sequence[pos] {
                 b'A' => counts[0] += 1,
@@ -230,10 +232,8 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
                 _ => {} // Skip gaps and other characters
             }
         }
-
-        // Follow C code logic exactly for MAF selection
+        // Follow C code logic exactly for MAF selection, including tie-breaking
         let (a, c, g, t) = (counts[0], counts[1], counts[2], counts[3]);
-
         maf_sequence[pos] = if a > c && a > g && a > t {
             b'A'
         } else if c > g && c > t {
@@ -254,7 +254,6 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
     // This follows haplotype_Set_InitializeRest logic
     let num_repeats = 10;
     let mut all_discovered_sequences: HashSet<Vec<u8>> = HashSet::new();
-    all_discovered_sequences.insert(maf_sequence.clone());
 
     let mut rng = thread_rng();
 
@@ -263,119 +262,112 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
 
         // Create random order of reads (Fisher-Yates shuffle)
         let mut read_indices: Vec<usize> = (0..reads.len()).collect();
-        for i in (1..read_indices.len()).rev() {
-            let j = rng.gen_range(0..=i);
-            read_indices.swap(i, j);
-        }
+        read_indices.shuffle(&mut rng);
 
         // Track haplotypes found in this iteration
         let mut iteration_haplotypes: Vec<Vec<u8>> = Vec::new();
-        iteration_haplotypes.push(maf_sequence.clone()); // Always start with MAF
 
         for &read_idx in &read_indices {
             let read = &reads[read_idx];
 
-            // Check if read matches MAF perfectly (ignore gaps)
+            // Check if read matches MAF perfectly (ignore gaps in read)
             let mismatches_with_maf = read
                 .sequence
                 .iter()
                 .zip(&maf_sequence)
-                .filter(|(&r, &h)| r != h && r != b'-' && r != b'N')
+                .filter(|(&r, &h)| r != h && r != b'-')
                 .count();
 
             if mismatches_with_maf == 0 {
-                continue; // Skip reads that match MAF perfectly
+                continue; // Skip reads that perfectly match MAF (ignoring their gaps)
             }
 
             // Try to match against existing haplotypes in this iteration
-            let mut matched_haplotype = false;
+            let mut matched_haplotype_idx = None;
 
-            for existing_hap in &mut iteration_haplotypes[1..] {
-                // Skip MAF at index 0
+            for (idx, existing_hap) in iteration_haplotypes.iter().enumerate() {
+                // In C, calc_mismatches_Initialization treats 'N' in haplotypes as a wildcard
+                // and ignores gaps in reads.
                 let mismatches = read
                     .sequence
                     .iter()
                     .zip(existing_hap.iter())
-                    .filter(|(&r, &h)| r != h && r != b'-' && r != b'N')
+                    .filter(|(&r, &h)| r != h && r != b'-' && h != b'N')
                     .count();
 
                 if mismatches == 0 {
-                    // Perfect match - extend this haplotype with read information
-                    matched_haplotype = true;
-                    for (pos, &nucleotide) in read.sequence.iter().enumerate() {
-                        if matches!(nucleotide, b'A' | b'C' | b'G' | b'T') {
-                            existing_hap[pos] = nucleotide;
-                        }
-                    }
+                    matched_haplotype_idx = Some(idx);
                     break;
                 }
             }
 
-            if !matched_haplotype {
+            if let Some(idx) = matched_haplotype_idx {
+                // Perfect match - extend this haplotype with read information
+                for (pos, &nucleotide) in read.sequence.iter().enumerate() {
+                    if matches!(nucleotide, b'A' | b'C' | b'G' | b'T') {
+                        iteration_haplotypes[idx][pos] = nucleotide;
+                    }
+                }
+            } else {
                 // Create new haplotype from this read
                 let mut new_haplotype = vec![b'-'; sequence_length];
-
                 for (pos, &nucleotide) in read.sequence.iter().enumerate() {
                     if matches!(nucleotide, b'A' | b'C' | b'G' | b'T') {
                         new_haplotype[pos] = nucleotide;
                     }
                 }
-
                 iteration_haplotypes.push(new_haplotype);
             }
         }
-
-        // Fill 'N' positions with MAF nucleotides and add to discovered sequences
-        for haplotype in &iteration_haplotypes {
-            let mut filled_haplotype = haplotype.clone();
-            for pos in 0..sequence_length {
-                if filled_haplotype[pos] == b'-' {
-                    filled_haplotype[pos] = maf_sequence[pos];
-                }
-            }
-            all_discovered_sequences.insert(filled_haplotype);
+        // Add all haplotypes from this iteration to the main set
+        for hap in iteration_haplotypes {
+            all_discovered_sequences.insert(hap);
         }
-
         debug!(
             "Iteration {} found {} haplotypes",
             repeat + 1,
-            iteration_haplotypes.len()
+            all_discovered_sequences.len()
         );
     }
 
+    // Combine MAF with all discovered haplotypes and remove duplicates
+    let mut final_sequences: HashSet<Vec<u8>> = HashSet::new();
+    final_sequences.insert(maf_sequence.clone());
+
+    for seq in all_discovered_sequences {
+        let mut filled_haplotype = seq;
+        for pos in 0..sequence_length {
+            if filled_haplotype[pos] == b'-' {
+                filled_haplotype[pos] = maf_sequence[pos];
+            }
+        }
+        final_sequences.insert(filled_haplotype);
+    }
     info!(
         "Total unique sequences discovered: {}",
-        all_discovered_sequences.len()
+        final_sequences.len()
     );
 
-    // Convert to Haplotype structs with uniform initial frequencies
-    let mut haplotypes: Vec<Haplotype> = all_discovered_sequences
+    // Convert to Haplotype structs and initialize frequencies randomly,
+    // replicating allele_Frequencies_Initialize from C code.
+    let mut haplotypes: Vec<Haplotype> = final_sequences
         .into_iter()
-        .map(|sequence| {
-            let mut frequencies = HashMap::new();
-            for sample in &samples {
-                frequencies.insert(sample.clone(), 1.0 / samples.len() as f64);
-            }
-            Haplotype {
-                sequence,
-                frequencies,
-            }
+        .map(|sequence| Haplotype {
+            sequence,
+            frequencies: HashMap::new(),
         })
         .collect();
 
-    // Normalize frequencies to ensure they sum to 1.0 per sample
     for sample in &samples {
-        let sum: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get(sample).unwrap_or(&0.0))
-            .sum();
-
+        let mut freqs: Vec<f64> = (0..haplotypes.len()).map(|_| rng.gen::<f64>()).collect();
+        let sum: f64 = freqs.iter().sum();
         if sum > 0.0 {
-            for haplotype in &mut haplotypes {
-                if let Some(freq) = haplotype.frequencies.get_mut(sample) {
-                    *freq /= sum;
-                }
+            for freq in &mut freqs {
+                *freq /= sum;
             }
+        }
+        for (i, haplotype) in haplotypes.iter_mut().enumerate() {
+            haplotype.frequencies.insert(sample.clone(), freqs[i]);
         }
     }
 
@@ -1826,12 +1818,8 @@ mod tests {
         assert!((sample1_sum - 1.0).abs() < 1e-10);
         assert!((sample2_sum - 1.0).abs() < 1e-10);
 
-        // With uniform initialization, each haplotype gets equal frequency per sample
-        let expected_freq = 1.0 / haplotypes.len() as f64;
-        for haplotype in &haplotypes {
-            assert!((haplotype.frequencies["sample1"] - expected_freq).abs() < 1e-10);
-            assert!((haplotype.frequencies["sample2"] - expected_freq).abs() < 1e-10);
-        }
+        // With random frequency initialization, we can no longer check for uniform
+        // frequencies. The checks above that ensure the sum is 1.0 are sufficient.
     }
 
     #[test]

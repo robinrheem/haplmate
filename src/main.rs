@@ -515,8 +515,12 @@ impl HaplotypeEstimationProblem {
         let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
         // TODO: Parallel processing
         for sample in &self.samples {
-            let sample_reads: Vec<&Read> =
-                self.reads.iter().filter(|r| r.sample == *sample).collect();
+            let sample_reads: Vec<(usize, &Read)> = self
+                .reads
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.sample == *sample)
+                .collect();
             let num_reads = sample_reads.len();
             let num_haps = haplotypes.len();
             if num_haps <= 1 {
@@ -550,13 +554,12 @@ impl HaplotypeEstimationProblem {
             // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
             let mismatches: Vec<Vec<f64>> = sample_reads
                 .iter()
-                .enumerate()
-                .map(|(i, read)| {
+                .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
                         .enumerate()
                         .map(|(j, hap)| {
-                            let count = *mismatch_cache.entry((i, j)).or_insert_with(|| {
+                            let count = *mismatch_cache.entry((read_idx, j)).or_insert_with(|| {
                                 read.sequence
                                     .iter()
                                     .zip(&hap.sequence)
@@ -593,34 +596,38 @@ impl HaplotypeEstimationProblem {
             let mut mismatch_fp_1 = vec![vec![0.0; num_haps]; num_reads];
             let mut mismatch_fp_2 = vec![vec![0.0; num_haps]; num_reads];
 
+            // Hoist memberships allocation to avoid re-allocation in every EM update
+            let mut memberships = vec![vec![0.0; num_haps]; num_reads];
             // EM update closure - equivalent to sqEMUpdate in C
-            let em_update = |mismatch_fp_in: &Vec<Vec<f64>>,
-                             theta_out: &mut [f64],
-                             mismatch_fp_out: &mut Vec<Vec<f64>>| {
-                // Temporary holding for membership probabilities
-                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
-                // E-step: Calculate memberships (normalized probabilities)
-                for i in 0..num_reads {
-                    let denom: f64 = mismatch_fp_in[i].iter().sum();
-                    if denom > 0.0 {
-                        for j in 0..num_haps {
-                            memberships[i][j] = mismatch_fp_in[i][j] / denom;
+            let mut em_update =
+                |mismatch_fp_in: &Vec<Vec<f64>>,
+                 theta_out: &mut [f64],
+                 mismatch_fp_out: &mut Vec<Vec<f64>>| {
+                    // E-step: Calculate memberships (normalized probabilities)
+                    for i in 0..num_reads {
+                        let denom: f64 = mismatch_fp_in[i].iter().sum();
+                        if denom > 0.0 {
+                            for j in 0..num_haps {
+                                memberships[i][j] = mismatch_fp_in[i][j] / denom;
+                            }
+                        } else {
+                            // clear row if denom is 0 to avoid using stale values
+                            memberships[i].iter_mut().for_each(|m| *m = 0.0);
                         }
                     }
-                }
-                // M-step: Update frequencies based on memberships
-                for j in 0..num_haps {
-                    theta_out[j] = 0.0;
-                    for i in 0..num_reads {
-                        theta_out[j] += memberships[i][j];
+                    // M-step: Update frequencies based on memberships
+                    for j in 0..num_haps {
+                        theta_out[j] = 0.0;
+                        for i in 0..num_reads {
+                            theta_out[j] += memberships[i][j];
+                        }
+                        theta_out[j] /= num_reads as f64;
+                        // Update mismatch_fp with new frequencies
+                        for i in 0..num_reads {
+                            mismatch_fp_out[i][j] = mismatches[i][j] * theta_out[j];
+                        }
                     }
-                    theta_out[j] /= num_reads as f64;
-                    // Update mismatch_fp with new frequencies
-                    for i in 0..num_reads {
-                        mismatch_fp_out[i][j] = mismatches[i][j] * theta_out[j];
-                    }
-                }
-            };
+                };
 
             // Calculate likelihood closure - equivalent to EM_likelihood_sq in C
             let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
@@ -692,9 +699,10 @@ impl HaplotypeEstimationProblem {
                 }
                 // Stabilization step if alpha far from 1.0
                 if (alpha - 1.0).abs() > 0.01 {
-                    // Create temporary copies to avoid borrowing conflict
-                    let mismatch_fp_temp = mismatch_fp_new.clone();
-                    em_update(&mismatch_fp_temp, &mut theta_new, &mut mismatch_fp_new);
+                    // Instead of cloning a large matrix, we use one of our pre-allocated
+                    // matrices as a buffer and then swap.
+                    em_update(&mismatch_fp_new, &mut theta_new, &mut mismatch_fp_1);
+                    std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_1);
                     iters += 1;
                 }
 
@@ -708,7 +716,7 @@ impl HaplotypeEstimationProblem {
                 {
                     // Copy theta_2 to theta_new
                     theta_new.copy_from_slice(&theta_2);
-                    mismatch_fp_new = mismatch_fp_2.clone();
+                    std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_2);
 
                     // Update likelihood
                     likelihood_new = calculate_likelihood(&mismatch_fp_new);
@@ -786,8 +794,12 @@ impl HaplotypeEstimationProblem {
         let mut mismatch_cache: HashMap<(usize, usize), usize> = HashMap::new();
 
         for sample in &self.samples {
-            let sample_reads: Vec<&Read> =
-                self.reads.iter().filter(|r| r.sample == *sample).collect();
+            let sample_reads: Vec<(usize, &Read)> = self
+                .reads
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.sample == *sample)
+                .collect();
             let num_reads = sample_reads.len();
             let num_haps = haplotypes.len();
             let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
@@ -829,13 +841,12 @@ impl HaplotypeEstimationProblem {
             // Pre-calculate mismatch probabilities
             let mismatches: Vec<Vec<f64>> = sample_reads
                 .iter()
-                .enumerate()
-                .map(|(i, read)| {
+                .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
                         .enumerate()
                         .map(|(j, hap)| {
-                            let count = *mismatch_cache.entry((i, j)).or_insert_with(|| {
+                            let count = *mismatch_cache.entry((read_idx, j)).or_insert_with(|| {
                                 read.sequence
                                     .iter()
                                     .zip(&hap.sequence)
@@ -865,10 +876,10 @@ impl HaplotypeEstimationProblem {
                 let mut memberships = vec![vec![0.0; num_haps]; num_reads];
                 // E-step: Calculate memberships (normalized probabilities)
                 for i in 0..num_reads {
-                    let denom: f64 = mismatches[i].iter().sum();
+                    let denom: f64 = mismatch_fp_new[i].iter().sum();
                     if denom > 0.0 {
                         for j in 0..num_haps {
-                            memberships[i][j] = mismatches[i][j] / denom;
+                            memberships[i][j] = mismatch_fp_new[i][j] / denom;
                         }
                     }
                 }
@@ -1329,7 +1340,7 @@ impl Anneal for HaplotypeEstimationProblem {
         let sa_progress = temp / self.sa_max_temperature;
         let convergence_delta =
             em_temp_end + (self.em_convergence_delta - em_temp_end) * sa_progress;
-        self.expectation_maximization(&mut new_haplotypes, convergence_delta)?;
+        self.square_expectation_maximization(&mut new_haplotypes, convergence_delta)?;
         debug!(
             "Annealing step complete, returning {} haplotypes",
             new_haplotypes.len()

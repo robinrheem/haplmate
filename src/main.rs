@@ -776,7 +776,7 @@ impl HaplotypeEstimationProblem {
         Ok(())
     }
 
-    fn expectation_maximization(
+    fn _expectation_maximization(
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,

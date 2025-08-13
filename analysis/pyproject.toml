@@ -9,5 +9,6 @@ dependencies = [
     "matplotlib>=3.10.3",
     "pandas>=2.3.1",
     "papermill>=2.6.0",
+    "rpy2>=3.6.2",
     "seaborn>=0.13.2",
 ]

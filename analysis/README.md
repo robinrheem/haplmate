@@ -5,11 +5,12 @@ Contains a self-contained parameterized Jupyter notebook for post-analysis of th
 Contents:
 - y: log-likelihood, x: iterations, see if log-likelihood converged and estimated correctly
 - y: frequency, x: haplotype, each data point has true frequency, estimated frequency, and average estimated frequency for all samples
-- Graph of the connections between the original and estimated haplotypes
+- Graph of the connections between the original and estimated haplotypes[haplonet](https://www.rdocumentation.org/packages/pegas/versions/1.3/topics/haploNet)
     - True Positive: Original exists, estimated correctly
     - False Positive: Original does not exist, estimated random haplotype
     - True Negative: Original exists, did not estimate
     - False Negative: Original does not exist, did not estimate(can't track)
+
 
 ## Usage
 

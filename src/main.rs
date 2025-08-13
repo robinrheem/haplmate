@@ -28,9 +28,6 @@ struct Args {
     /// Maximum number of EM iterations during intermediate steps
     #[arg(short, long, default_value = "20000")]
     em_iterations: usize,
-    /// Strength of annealing
-    #[arg(long, default_value = "0.1")]
-    sa_schedule: f64,
     /// Lambda1 value (for testing purposes only)
     #[arg(long, default_value = "0.0001")]
     lambda1: f64,
@@ -40,18 +37,12 @@ struct Args {
     /// Sequencing error
     #[arg(short = 'd', long, default_value = "0.00001")]
     error_rate: f64,
-    /// Minimum temp to reach in simulated annealing
-    #[arg(long, default_value = "0.0")]
-    sa_min_temperature: f64,
     /// Starting maximum temp in simulated annealing
     #[arg(long, default_value = "10.0")]
     sa_max_temperature: f64,
     /// Number of iterations in simulated annealing
     #[arg(long, default_value = "2000")]
     sa_iterations: usize,
-    /// Interval between calling EM
-    #[arg(long, default_value = "10")]
-    em_interval: usize,
     /// Number of reruns of optimization algorithm
     #[arg(long, default_value = "5")]
     sa_reruns: usize,

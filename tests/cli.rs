@@ -213,9 +213,6 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
-        .arg("--sa-min-temperature=0.0")
-        .arg("--sa-schedule=0.1")
-        .arg("--em-interval=10")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.5")
         .arg("--seed=12345")
@@ -233,9 +230,6 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
-        .arg("--sa-min-temperature=0.0")
-        .arg("--sa-schedule=0.1")
-        .arg("--em-interval=10")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.04")
         .arg("--seed=12345")
@@ -555,7 +549,6 @@ fn test_single_sample_with_gaps() -> Result<()> {
     let mut cmd = Command::cargo_bin("haplmate")?;
     cmd.arg(sample_path)
         .arg("--sa-max-temperature=10.0")
-        .arg("--sa-min-temperature=0.0")
         .arg("--seed=12345");
 
     let output = cmd.output()?;
@@ -649,7 +642,6 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
     }
     cmd.arg("--sa-reruns=1")
         .arg("--sa-max-temperature=10.0")
-        .arg("--sa-min-temperature=0.0")
         .arg("--lambda1=0.001")
         .arg("--lambda2=0.001")
         .arg("--seed=12345");

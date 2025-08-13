@@ -124,6 +124,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "pandas" },
     { name = "papermill" },
+    { name = "rpy2" },
     { name = "seaborn" },
 ]
 
@@ -133,6 +134,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "pandas", specifier = ">=2.3.1" },
     { name = "papermill", specifier = ">=2.6.0" },
+    { name = "rpy2", specifier = ">=3.6.2" },
     { name = "seaborn", specifier = ">=0.13.2" },
 ]
 
@@ -2657,6 +2659,55 @@ wheels = [
 ]
 
 [[package]]
+name = "rpy2"
+version = "3.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "packaging", marker = "sys_platform == 'win32'" },
+    { name = "rpy2-rinterface" },
+    { name = "rpy2-robjects" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8a/70/8ea0f4c4157bc514f9276f08c39eff2c509dbf6b00ba8ea4c0763ab3e79d/rpy2-3.6.2.tar.gz", hash = "sha256:174ea5776a91d03b35dd5611889960e0f5451e9d0abea4abfc8c0be6a85377d0", size = 52959, upload-time = "2025-08-02T23:07:57.434Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8e/63/6877f5440fa30a3882e9e36f68389c750354fd86c11fd61d0860c021d9b4/rpy2-3.6.2-py3-none-any.whl", hash = "sha256:bcfc5adebf54711a3a8f65c7ce113b4ad0fabc227746644effb4f831c580d6bd", size = 9898, upload-time = "2025-08-02T23:08:10.74Z" },
+]
+
+[[package]]
+name = "rpy2-rinterface"
+version = "3.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "packaging", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cf/9d/8f34eb5f3fb171bf49378848ffc0969cc88162809b3f526a0f31804ce73d/rpy2_rinterface-3.6.2.tar.gz", hash = "sha256:b62a0de00c64c469c3c59a4e5aee53112aa11da9dd6e52d3cd6cb741026156c2", size = 79242, upload-time = "2025-08-02T23:07:17.536Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c8/f8/9742a03344c4cc9de141e2639c796219a701bf2d0a16c77547bff384ba24/rpy2_rinterface-3.6.2-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:9f49eebac244e06bf53531e9f2148d51837936a7e9868df095d73f7dc8d40e82", size = 172951, upload-time = "2025-08-02T23:07:27.059Z" },
+    { url = "https://files.pythonhosted.org/packages/79/2c/70ab965d49021d7df2bf3ee7b8dab38f5446d6c8387f09156acdb95beb1b/rpy2_rinterface-3.6.2-cp310-cp310-win_amd64.whl", hash = "sha256:93c7d1aed351b35f7d1500aeec412c867fb7819f4476e79dff4e601df75bd15e", size = 173912, upload-time = "2025-08-02T23:07:28.385Z" },
+    { url = "https://files.pythonhosted.org/packages/85/2b/8c8e1eb39c19bdb04576f3d2e434f5bcf3c27565b59c880630338c82307a/rpy2_rinterface-3.6.2-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:686deed0a421daa08d4f69fb105bdded939f470200adf50c7d3a51ab43f6687b", size = 172950, upload-time = "2025-08-02T23:07:29.816Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/fb/1b4fc5e22fea7f78bf1398f4ca1842a4a7db0640536f91e9a1b05b1eae5e/rpy2_rinterface-3.6.2-cp311-cp311-win_amd64.whl", hash = "sha256:98516c24b7d1fd28299ab254a5b0076c99cfd8c93f33569b45e054211fa5e850", size = 173909, upload-time = "2025-08-02T23:07:30.831Z" },
+    { url = "https://files.pythonhosted.org/packages/95/69/e891c777a892aa631875c14c469808da296557fdbc0482d1f3de6c6cd6c4/rpy2_rinterface-3.6.2-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:65878847e9eefbcf11253d776406a34ef651e4caec52bf93a2967967e967f0bf", size = 173071, upload-time = "2025-08-02T23:07:31.866Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/2d/1e5d3d0e901e75c6162fb7ab4d0dc6aa6142eaa49235cc6d225e1728fa2b/rpy2_rinterface-3.6.2-cp312-cp312-win_amd64.whl", hash = "sha256:ff0a99b2196dee7adc7836243a5f1e757f7ce7646c54641461bee185ca5be429", size = 174337, upload-time = "2025-08-02T23:07:32.885Z" },
+    { url = "https://files.pythonhosted.org/packages/38/7a/189bbeb03485dd929d2431b897fd81a9d94e58dc3c759d52ad32e4eb98af/rpy2_rinterface-3.6.2-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:fe9efcfb0d51c5ce977d16e7edcdcb9c2336f308bb82180e77c5517a5d40bf5f", size = 173073, upload-time = "2025-08-02T23:07:34.225Z" },
+    { url = "https://files.pythonhosted.org/packages/70/a4/8ce8c124275600fae61916e82cd3c13562b0d765e53aede751f3da2961f2/rpy2_rinterface-3.6.2-cp313-cp313-win_amd64.whl", hash = "sha256:9c34e402f4062f09326128baa3d6a140567124a2770009578b571ed2aeaba13e", size = 174334, upload-time = "2025-08-02T23:07:35.342Z" },
+]
+
+[[package]]
+name = "rpy2-robjects"
+version = "3.6.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jinja2" },
+    { name = "packaging", marker = "sys_platform == 'win32'" },
+    { name = "rpy2-rinterface" },
+    { name = "tzlocal" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c2/a5/3f0187417b2bde373258e2ef4e0a9296ef7e049278a2164c363797adc585/rpy2_robjects-3.6.1.tar.gz", hash = "sha256:934a7b58873531eeae4b44557f9fadb6680a0ac85d6f042afd30296b04b6c47a", size = 105374, upload-time = "2025-06-08T14:39:02.433Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/3b/9bc0f0281b29f943f9d9fa7f2db07fb6cf4a6e35e39a8b8f0a612cfc3f5c/rpy2_robjects-3.6.1-py3-none-any.whl", hash = "sha256:8699e4554391bcaac5fb32d39828f90d9fb5c0b00236da74bb874da587e92bc7", size = 125387, upload-time = "2025-06-08T14:39:00.382Z" },
+]
+
+[[package]]
 name = "seaborn"
 version = "0.13.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2869,6 +2920,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/95/32/1a225d6164441be760d75c2c42e2780dc0873fe382da3e98a2e1e48361e5/tzdata-2025.2.tar.gz", hash = "sha256:b60a638fcc0daffadf82fe0f57e53d06bdec2f36c4df66280ae79bce6bd6f2b9", size = 196380, upload-time = "2025-03-23T13:54:43.652Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5c/23/c7abc0ca0a1526a0774eca151daeb8de62ec457e77262b66b359c3c7679e/tzdata-2025.2-py2.py3-none-any.whl", hash = "sha256:1a403fada01ff9221ca8044d701868fa132215d84beb92242d9acd2147f667a8", size = 347839, upload-time = "2025-03-23T13:54:41.845Z" },
+]
+
+[[package]]
+name = "tzlocal"
+version = "5.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8b/2e/c14812d3d4d9cd1773c6be938f89e5735a1f11a9f184ac3639b93cef35d5/tzlocal-5.3.1.tar.gz", hash = "sha256:cceffc7edecefea1f595541dbd6e990cb1ea3d19bf01b2809f362a03dd7921fd", size = 30761, upload-time = "2025-03-05T21:17:41.549Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c2/14/e2a54fabd4f08cd7af1c07030603c3356b74da07f7cc056e600436edfa17/tzlocal-5.3.1-py3-none-any.whl", hash = "sha256:eb1a66c3ef5847adf7a834f1be0800581b683b5608e74f86ecbcef8ab91bb85d", size = 18026, upload-time = "2025-03-05T21:17:39.857Z" },
 ]
 
 [[package]]

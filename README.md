@@ -105,6 +105,41 @@ SUM,1,1
 
 ```bash
 haplmate [OPTIONS] <FILE>...
+
+Estimating haplotypes with Simulated Annealing and Expectation-Maximization
+
+Usage: haplmate-x86_64-unknown-linux-gnu [OPTIONS] [FILE]...
+
+Arguments:
+  [FILE]...  Input FASTA file(s) [default: -]
+
+Options:
+  -o, --output <OUTPUT>
+          Output file [default: estimated_haplotypes.csv]
+  -m, --mismatches <MISMATCHES>
+          Maximum allowed mismatch between haplotypes and reads [default: 15]
+  -e, --em-iterations <EM_ITERATIONS>
+          Maximum number of EM iterations during intermediate steps [default: 20000]
+      --lambda1 <LAMBDA1>
+          Lambda1 value (for testing purposes only) [default: 0.0001]
+      --lambda2 <LAMBDA2>
+          Lambda2 value (for testing purposes only) [default: 0.0001]
+  -d, --error-rate <ERROR_RATE>
+          Sequencing error [default: 0.00001]
+      --sa-max-temperature <SA_MAX_TEMPERATURE>
+          Starting maximum temp in simulated annealing [default: 10.0]
+      --sa-iterations <SA_ITERATIONS>
+          Number of iterations in simulated annealing [default: 2000]
+      --sa-reruns <SA_RERUNS>
+          Number of reruns of optimization algorithm [default: 5]
+      --em-cdelta <EM_CDELTA>
+          Delta to determine intermediate EM convergence steps [default: 0.1]
+      --seed <SEED>
+          Random seed for deterministic output(testing purposes only)
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 - FILE: One or more FASTA files (each file is treated as a separate sample).

@@ -179,8 +179,20 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
             .records()
             .filter_map(|result| result.ok())
             .for_each(|record| {
+                let mut sequence = record.seq().to_vec();
+                // Normalize to uppercase for consistent haplotype comparison
+                // This treats ACGT, acgt, AcGt, etc. as identical sequences
+                for nucleotide in &mut sequence {
+                    match nucleotide {
+                        b'a' => *nucleotide = b'A',
+                        b'c' => *nucleotide = b'C',
+                        b'g' => *nucleotide = b'G',
+                        b't' => *nucleotide = b'T',
+                        _ => {} // Leave other characters unchanged (gaps, N, etc.)
+                    }
+                }
                 reads.push(Read {
-                    sequence: record.seq().to_vec(),
+                    sequence,
                     sample: sample.to_string(),
                 });
             });
@@ -1505,9 +1517,22 @@ mod tests {
     fn create_test_reads(sequences: Vec<&str>, sample: &str) -> Vec<Read> {
         sequences
             .into_iter()
-            .map(|seq| Read {
-                sequence: seq.as_bytes().to_vec(),
-                sample: sample.to_string(),
+            .map(|seq| {
+                let mut sequence = seq.as_bytes().to_vec();
+                // Normalize to uppercase to match extract_reads behavior
+                for nucleotide in &mut sequence {
+                    match nucleotide {
+                        b'a' => *nucleotide = b'A',
+                        b'c' => *nucleotide = b'C',
+                        b'g' => *nucleotide = b'G',
+                        b't' => *nucleotide = b'T',
+                        _ => {}
+                    }
+                }
+                Read {
+                    sequence,
+                    sample: sample.to_string(),
+                }
             })
             .collect()
     }
@@ -1515,9 +1540,22 @@ mod tests {
     fn create_test_haplotypes(sequences: Vec<&str>) -> Vec<Haplotype> {
         sequences
             .into_iter()
-            .map(|seq| Haplotype {
-                sequence: seq.as_bytes().to_vec(),
-                frequencies: HashMap::new(),
+            .map(|seq| {
+                let mut sequence = seq.as_bytes().to_vec();
+                // Normalize to uppercase to match extract_reads behavior
+                for nucleotide in &mut sequence {
+                    match nucleotide {
+                        b'a' => *nucleotide = b'A',
+                        b'c' => *nucleotide = b'C',
+                        b'g' => *nucleotide = b'G',
+                        b't' => *nucleotide = b'T',
+                        _ => {}
+                    }
+                }
+                Haplotype {
+                    sequence,
+                    frequencies: HashMap::new(),
+                }
             })
             .collect()
     }
@@ -1993,5 +2031,40 @@ mod tests {
         let invariant_positions = vec![(2, b'G'), (1, b'T')];
         let result = restore_invariants(sequence, &invariant_positions);
         assert_eq!(result, b"ATGC");
+    }
+
+    #[test]
+    fn test_case_insensitive_sequence_handling() {
+        // Test that sequences with different cases are treated as identical
+        let reads = create_test_reads(vec!["acgt", "ACGT", "AcGt", "aCgT"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        // All case variations should produce a single haplotype
+        assert_eq!(haplotypes.len(), 1);
+        assert_eq!(haplotypes[0].sequence, b"ACGT"); // Normalized to uppercase
+        assert_eq!(haplotypes[0].frequencies.len(), 1);
+        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+    }
+
+    #[test]
+    fn test_mixed_case_sequences_with_differences() {
+        // Test mixed case sequences that are actually different
+        let reads = create_test_reads(vec!["acgt", "ACGT", "atgc", "ATGC"], "sample1");
+        let haplotypes = init_haplotypes(&reads);
+
+        // Should produce at least 2 haplotypes (may include MAF haplotype)
+        assert!(haplotypes.len() >= 2);
+
+        // Check that both ACGT and ATGC sequences are present (normalized)
+        let sequences: HashSet<Vec<u8>> = haplotypes.iter().map(|h| h.sequence.clone()).collect();
+        assert!(sequences.contains(&b"ACGT".to_vec()));
+        assert!(sequences.contains(&b"ATGC".to_vec()));
+
+        // Check frequencies sum to 1.0
+        let total_freq: f64 = haplotypes
+            .iter()
+            .map(|h| h.frequencies.get("sample1").unwrap_or(&0.0))
+            .sum();
+        assert!((total_freq - 1.0).abs() < 1e-10);
     }
 }

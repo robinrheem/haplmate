@@ -1084,6 +1084,146 @@ impl HaplotypeEstimationProblem {
         // Count number of remaining intervals/recombinations
         interval_list.iter().filter(|&&x| x != -1).count()
     }
+
+    /// Applies a random annealing operation to the haplotype set
+    ///
+    /// # Arguments
+    /// * `haplotypes` - The haplotype set to modify
+    /// * `rng` - Random number generator to use
+    ///
+    /// # Returns
+    /// Whether an operation was successfully applied
+    fn random_operation(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) -> bool {
+        // Determine which operation to perform based on current state
+        let operation: i32 = if haplotypes.len() == 1 {
+            debug!("Only one haplotype present, forcing add operation");
+            2 // Force add operation for single haplotype
+        } else {
+            rng.gen_range(0..3)
+        };
+
+        match operation {
+            0 if haplotypes.len() > 1 => {
+                // Delete a random haplotype
+                let idx_to_remove = rng.gen_range(0..haplotypes.len());
+                debug!(
+                    "Operation: Delete - Removing haplotype at index {}",
+                    idx_to_remove
+                );
+                haplotypes.remove(idx_to_remove);
+                true
+            }
+            1 if haplotypes.len() >= 2 => {
+                // Recombine two random haplotypes
+                debug!("Operation: Recombine");
+                self.recombine(haplotypes, rng);
+                true
+            }
+            2 if haplotypes.len() < self.reads.len() => {
+                // Add a new haplotype by mutating an existing one
+                debug!("Operation: Add new haplotype by mutation");
+                self.mutate(haplotypes, rng);
+                true
+            }
+            _ => {
+                trace!("No operation performed - conditions not met");
+                false
+            }
+        }
+    }
+
+    /// Applies recombination operation between two random haplotypes
+    fn recombine(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
+        let idx1 = rng.gen_range(0..haplotypes.len());
+        let mut idx2 = rng.gen_range(0..haplotypes.len());
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: i32 = 100;
+
+        trace!("Initial recombination pair: indices {} and {}", idx1, idx2);
+
+        // Try to find compatible haplotypes for recombination
+        loop {
+            if attempts >= MAX_ATTEMPTS {
+                debug!(
+                    "Failed to find compatible haplotypes after {} attempts",
+                    attempts
+                );
+                return;
+            }
+            if idx1 == idx2 {
+                trace!("Same indices, regenerating idx2");
+                idx2 = rng.gen_range(0..haplotypes.len());
+                attempts += 1;
+                continue;
+            }
+
+            let crossover_point = rng.gen_range(0..haplotypes[idx1].sequence.len());
+            debug!(
+                "Performing recombination at position {} between haplotypes {} and {}",
+                crossover_point, idx1, idx2
+            );
+
+            let mut recombined1 = haplotypes[idx1].sequence.clone();
+            let mut recombined2 = haplotypes[idx2].sequence.clone();
+            recombined1[crossover_point..]
+                .copy_from_slice(&haplotypes[idx2].sequence[crossover_point..]);
+            recombined2[crossover_point..]
+                .copy_from_slice(&haplotypes[idx1].sequence[crossover_point..]);
+
+            let mut new_sequences = Vec::new();
+            if !haplotypes.iter().any(|h| h.sequence == recombined1) {
+                trace!("Adding first recombined sequence");
+                new_sequences.push(recombined1);
+            }
+            if !haplotypes.iter().any(|h| h.sequence == recombined2) {
+                trace!("Adding second recombined sequence");
+                new_sequences.push(recombined2);
+            }
+
+            debug!("Generated {} new unique sequences", new_sequences.len());
+
+            for new_seq in new_sequences {
+                let mut combined_frequencies = HashMap::new();
+                for (sample, &freq1) in &haplotypes[idx1].frequencies {
+                    let freq2 = haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
+                    combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
+                }
+                haplotypes.push(Haplotype {
+                    sequence: new_seq,
+                    frequencies: combined_frequencies,
+                });
+            }
+            break;
+        }
+    }
+
+    /// Applies mutation operation to create a new haplotype
+    fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
+        let idx_to_copy = rng.gen_range(0..haplotypes.len());
+        let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
+        let pos_to_change = rng.gen_range(0..new_sequence.len());
+        let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
+
+        trace!(
+            "Mutating haplotype {} at position {} to {}",
+            idx_to_copy,
+            pos_to_change,
+            new_nucleotide as char
+        );
+
+        new_sequence[pos_to_change] = new_nucleotide;
+
+        // Only add if this sequence doesn't already exist
+        if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
+            debug!("Adding new mutated haplotype");
+            haplotypes.push(Haplotype {
+                sequence: new_sequence,
+                frequencies: haplotypes[idx_to_copy].frequencies.clone(),
+            });
+        } else {
+            debug!("Mutated sequence already exists, skipping addition");
+        }
+    }
 }
 
 impl CostFunction for HaplotypeEstimationProblem {
@@ -1189,10 +1329,8 @@ impl Anneal for HaplotypeEstimationProblem {
     /// 2. Recombine two random haplotypes by performing a crossover (if there are at least 2 haplotypes)
     /// 3. Add a new haplotype by mutating an existing one (if number of haplotypes < number of reads)
     ///
-    /// Additionally, when temperature is high, it may perform an extra random mutation to help
-    /// explore the solution space more broadly.
-    ///
     /// After structural modifications, it runs Square EM to optimize the frequencies.
+    /// If EM removes all haplotypes, it retries with different operations (matching C code behavior).
     ///
     /// # Arguments
     ///
@@ -1203,152 +1341,63 @@ impl Anneal for HaplotypeEstimationProblem {
     ///
     /// * `Ok(Vec<Haplotype>)` - A new set of haplotypes after applying random modifications
     /// * `Err(anyhow::Error)` - If an error occurs during frequency optimization
-    ///
-    /// # Implementation Details
-    ///
-    /// - Uses thread_rng for random number generation
-    /// - Ensures no duplicate sequences are added
-    /// - Mutation operations scale with temperature
-    /// - Maintains sample consistency when recombining haplotypes
-    /// - Runs Square EM after modifications to optimize frequencies
+
     fn anneal(
         &self,
         param: &Self::Param,
         temp: Self::Float,
     ) -> Result<Self::Output, anyhow::Error> {
-        trace!("Starting annealing step with temperature {}", temp);
-
-        let mut rng = if let Some(seed) = self.seed {
-            rand::rngs::StdRng::seed_from_u64(seed)
-        } else {
-            rand::rngs::StdRng::from_entropy()
-        };
-        let mut new_haplotypes = param.clone();
-        debug!("Current number of haplotypes: {}", new_haplotypes.len());
-
-        // If there's only one haplotype, we can't delete it
-        // So we just add a new haplotype
-        let operation: i32 = if new_haplotypes.len() == 1 {
-            debug!("Only one haplotype present, forcing add operation");
-            2
-        } else {
-            rng.gen_range(0..3)
-        };
-        match operation {
-            0 if new_haplotypes.len() > 1 => {
-                // Delete a random haplotype
-                let idx_to_remove = rng.gen_range(0..new_haplotypes.len());
-                debug!(
-                    "Operation: Delete - Removing haplotype at index {}",
-                    idx_to_remove
-                );
-                new_haplotypes.remove(idx_to_remove);
-            }
-            1 if new_haplotypes.len() >= 2 => {
-                // Recombine two random haplotypes
-                debug!("Operation: Recombine");
-                let idx1 = rng.gen_range(0..new_haplotypes.len());
-                let mut idx2 = rng.gen_range(0..new_haplotypes.len());
-                let mut attempts = 0;
-                const MAX_ATTEMPTS: i32 = 100;
-                trace!("Initial recombination pair: indices {} and {}", idx1, idx2);
-                // Try to find compatible haplotypes for recombination
-                loop {
-                    if attempts >= MAX_ATTEMPTS {
-                        debug!(
-                            "Failed to find compatible haplotypes after {} attempts",
-                            attempts
-                        );
-                        break;
-                    }
-                    if idx1 == idx2 {
-                        trace!("Same indices, regenerating idx2");
-                        idx2 = rng.gen_range(0..new_haplotypes.len());
-                        attempts += 1;
-                        continue;
-                    }
-                    let crossover_point = rng.gen_range(0..new_haplotypes[idx1].sequence.len());
-                    debug!(
-                        "Performing recombination at position {} between haplotypes {} and {}",
-                        crossover_point, idx1, idx2
-                    );
-                    let mut recombined1 = new_haplotypes[idx1].sequence.clone();
-                    let mut recombined2 = new_haplotypes[idx2].sequence.clone();
-                    recombined1[crossover_point..]
-                        .copy_from_slice(&new_haplotypes[idx2].sequence[crossover_point..]);
-                    recombined2[crossover_point..]
-                        .copy_from_slice(&new_haplotypes[idx1].sequence[crossover_point..]);
-                    let mut new_sequences = Vec::new();
-                    if !new_haplotypes.iter().any(|h| h.sequence == recombined1) {
-                        trace!("Adding first recombined sequence");
-                        new_sequences.push(recombined1);
-                    }
-                    if !new_haplotypes.iter().any(|h| h.sequence == recombined2) {
-                        trace!("Adding second recombined sequence");
-                        new_sequences.push(recombined2);
-                    }
-                    debug!("Generated {} new unique sequences", new_sequences.len());
-                    for new_seq in new_sequences {
-                        let mut combined_frequencies = HashMap::new();
-                        for (sample, &freq1) in &new_haplotypes[idx1].frequencies {
-                            let freq2 =
-                                new_haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
-                            combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
-                        }
-                        new_haplotypes.push(Haplotype {
-                            sequence: new_seq,
-                            frequencies: combined_frequencies,
-                        });
-                    }
-                    break;
-                }
-            }
-            2 if new_haplotypes.len() < self.reads.len() => {
-                // Add a new haplotype by mutating an existing one
-                debug!("Operation: Add new haplotype by mutation");
-                let idx_to_copy = rng.gen_range(0..new_haplotypes.len());
-                let mut new_sequence = new_haplotypes[idx_to_copy].sequence.clone();
-                let pos_to_change = rng.gen_range(0..new_sequence.len());
-                let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
-
-                trace!(
-                    "Mutating haplotype {} at position {} to {}",
-                    idx_to_copy,
-                    pos_to_change,
-                    new_nucleotide as char
-                );
-
-                new_sequence[pos_to_change] = new_nucleotide;
-                // Only add if this sequence doesn't already exist
-                if !new_haplotypes.iter().any(|h| h.sequence == new_sequence) {
-                    debug!("Adding new mutated haplotype");
-                    new_haplotypes.push(Haplotype {
-                        sequence: new_sequence,
-                        frequencies: new_haplotypes[idx_to_copy].frequencies.clone(),
-                    });
-                } else {
-                    debug!("Mutated sequence already exists, skipping addition");
-                }
-            }
-            _ => {
-                trace!("No operation performed - conditions not met");
-            }
+        debug!("Starting annealing step with temperature {}", temp);
+        if param.is_empty() {
+            debug!("No haplotypes available for annealing operations, returning original set");
+            return Ok(param.clone());
         }
-        debug!(
-            "Running EM optimization on {} haplotypes",
-            new_haplotypes.len()
-        );
-        // Mutate haplotype frequencies with and zero-out with Square EM
+        // Calculate EM convergence parameters
         let em_temp_end = 0.00001;
         let sa_progress = temp / self.sa_max_temperature;
         let convergence_delta =
             em_temp_end + (self.em_convergence_delta - em_temp_end) * sa_progress;
-        self.square_expectation_maximization(&mut new_haplotypes, convergence_delta)?;
+        // Retry mechanism: keep trying until we get a non-empty result
+        const MAX_RETRIES: usize = 10000;
+        for retry_count in 0..=MAX_RETRIES {
+            let mut haplotypes = param.clone();
+            // Create RNG with potentially different seed for each retry
+            let mut rng = if let Some(seed) = self.seed {
+                rand::rngs::StdRng::seed_from_u64(seed + retry_count as u64)
+            } else {
+                rand::rngs::StdRng::from_entropy()
+            };
+            // Apply random operation
+            if !self.random_operation(&mut haplotypes, &mut rng) {
+                debug!(
+                    "No operation could be applied on attempt {}",
+                    retry_count + 1
+                );
+                if retry_count == MAX_RETRIES {
+                    break;
+                }
+                continue;
+            }
+            debug!("Running EM optimization on {} haplotypes", haplotypes.len());
+            self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+            if !haplotypes.is_empty() {
+                debug!(
+                    "Annealing step complete, returning {} haplotypes",
+                    haplotypes.len()
+                );
+                return Ok(haplotypes);
+            }
+            debug!(
+                "EM optimization removed all haplotypes (attempt {}/{}), retrying",
+                retry_count + 1,
+                MAX_RETRIES + 1
+            );
+        }
         debug!(
-            "Annealing step complete, returning {} haplotypes",
-            new_haplotypes.len()
+            "Failed to find valid haplotype set after {} retries, using original set",
+            MAX_RETRIES
         );
-        Ok(new_haplotypes)
+        Ok(param.clone())
     }
 }
 

@@ -1436,6 +1436,20 @@ fn propose_haplotypes(
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
     };
+    info!(
+        "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, original_read_length={}, seed={:?}",
+        problem.samples.len(),
+        reads.len(),
+        optimization_parameters.error_rate,
+        optimization_parameters.lambda1,
+        optimization_parameters.lambda2,
+        optimization_parameters.max_mismatches,
+        optimization_parameters.em_iterations,
+        optimization_parameters.em_cdelta,
+        optimization_parameters.sa_max_temperature,
+        optimization_parameters.original_read_length,
+        optimization_parameters.seed
+    );
     let rng = if let Some(seed) = optimization_parameters.seed {
         rand::rngs::StdRng::seed_from_u64(seed)
     } else {

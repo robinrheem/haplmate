@@ -1341,7 +1341,6 @@ impl Anneal for HaplotypeEstimationProblem {
     ///
     /// * `Ok(Vec<Haplotype>)` - A new set of haplotypes after applying random modifications
     /// * `Err(anyhow::Error)` - If an error occurs during frequency optimization
-
     fn anneal(
         &self,
         param: &Self::Param,
@@ -1439,12 +1438,33 @@ fn propose_haplotypes(
         .unwrap()
         .with_temp_func(SATempFunc::TemperatureFast)
         .with_stall_best(optimization_parameters.sa_iterations as u64);
+    // Optimize initial haplotypes with EM before starting SA
     let mut best_haplotypes = initial_haplotypes.clone();
+    info!(
+        "Running EM optimization on initial {} haplotypes",
+        best_haplotypes.len()
+    );
+    // Calculate EM convergence parameters
+    let em_temp_end = 0.00001;
+    let sa_progress = optimization_parameters.sa_max_temperature;
+    let convergence_delta =
+        em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
+    {
+        info!(
+            "EM optimization failed: {}, proceeding with unoptimized haplotypes",
+            e
+        );
+    }
+    info!(
+        "EM optimization completed. {} haplotypes remain",
+        best_haplotypes.len()
+    );
     let mut best_objective = f64::INFINITY;
     for i in 0..optimization_parameters.sa_reruns {
         info!(
             "Running SA with {} haplotypes, iteration {}",
-            initial_haplotypes.len(),
+            best_haplotypes.len(),
             i
         );
         let result = Executor::new(problem.clone(), solver.clone())

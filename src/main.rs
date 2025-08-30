@@ -755,6 +755,13 @@ impl HaplotypeEstimationProblem {
             let mut non_zero = false;
             for sample in &self.samples {
                 if let Some(&freq) = haplotype.frequencies.get(sample) {
+                    trace!(
+                        "Checking haplotype {} for sample {}: sequence={}, frequency={:?}",
+                        hap_idx,
+                        sample,
+                        String::from_utf8_lossy(&haplotype.sequence),
+                        haplotype.frequencies.get(sample)
+                    );
                     if !freq.is_nan() && freq >= 0.005 {
                         non_zero = true;
                         break;

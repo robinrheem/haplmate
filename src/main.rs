@@ -1469,7 +1469,7 @@ fn propose_haplotypes(
         seed: optimization_parameters.seed,
     };
     info!(
-        "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, original_read_length={}, seed={:?}",
+        "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
         problem.samples.len(),
         reads.len(),
         optimization_parameters.error_rate,
@@ -1479,6 +1479,8 @@ fn propose_haplotypes(
         optimization_parameters.em_iterations,
         optimization_parameters.em_cdelta,
         optimization_parameters.sa_max_temperature,
+        optimization_parameters.sa_iterations,
+        optimization_parameters.sa_reruns,
         optimization_parameters.original_read_length,
         optimization_parameters.seed
     );

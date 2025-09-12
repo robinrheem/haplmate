@@ -376,8 +376,19 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
             haplotype.frequencies.insert(sample.clone(), freqs[i]);
         }
     }
-
-    debug!(
+    for (i, haplotype) in haplotypes.iter().enumerate() {
+        let sequence_str = String::from_utf8_lossy(&haplotype.sequence);
+        let mut freq_info = String::new();
+        for sample in &samples {
+            let freq = haplotype.frequencies.get(sample).unwrap_or(&0.0);
+            if !freq_info.is_empty() {
+                freq_info.push_str(", ");
+            }
+            freq_info.push_str(&format!("{}: {:.6}", sample, freq));
+        }
+        debug!("Haplotype {}: {} [{}]", i + 1, sequence_str, freq_info);
+    }
+    info!(
         "Created {} haplotypes with frequency distributions",
         haplotypes.len()
     );
@@ -568,6 +579,14 @@ impl HaplotypeEstimationProblem {
             // Thetas are all haplotype frequencies
             // Initialize frequencies uniformly if not already set
             // Using the same minimum frequency logic as C code (0.01)
+            // First ensure all haplotypes have frequency data for ALL samples
+            for haplotype in haplotypes.iter_mut() {
+                for s in &self.samples {
+                    if !haplotype.frequencies.contains_key(s) {
+                        haplotype.frequencies.insert(s.clone(), 0.01);
+                    }
+                }
+            }
             let mut theta_new: Vec<f64> = haplotypes
                 .iter()
                 .map(|hap| {
@@ -787,13 +806,6 @@ impl HaplotypeEstimationProblem {
             let mut non_zero = false;
             for sample in &self.samples {
                 if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    trace!(
-                        "Checking haplotype {} for sample {}: sequence={}, frequency={:?}",
-                        hap_idx,
-                        sample,
-                        String::from_utf8_lossy(&haplotype.sequence),
-                        haplotype.frequencies.get(sample)
-                    );
                     if !freq.is_nan() && freq >= 0.005 {
                         non_zero = true;
                         break;
@@ -803,6 +815,24 @@ impl HaplotypeEstimationProblem {
             if !non_zero {
                 indices_to_remove.push(hap_idx);
             }
+        }
+        // Log haplotypes being removed
+        for &idx in &indices_to_remove {
+            let haplotype = &haplotypes[idx];
+            let freq_str: Vec<String> = self
+                .samples
+                .iter()
+                .map(|sample| match haplotype.frequencies.get(sample) {
+                    Some(&freq) => format!("{}:{:.6}", sample, freq),
+                    None => format!("{}:0.000000", sample),
+                })
+                .collect();
+            trace!(
+                "Removing haplotype {}: sequence={}, frequencies=[{}]",
+                idx,
+                String::from_utf8_lossy(&haplotype.sequence),
+                freq_str.join(", ")
+            );
         }
         // Remove haplotypes in reverse order to maintain correct indices
         for &idx in indices_to_remove.iter().rev() {

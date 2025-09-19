@@ -69,7 +69,7 @@ struct Read {
 #[derive(Debug, Clone)]
 struct Haplotype {
     sequence: Vec<u8>,
-    frequencies: HashMap<String, f64>,
+    frequencies: Vec<f64>,
 }
 
 #[derive(Debug)]
@@ -217,15 +217,15 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
 /// # Returns
 ///
 /// List of haplotypes(full sequences) with initial frequencies
-fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
+fn init_haplotypes(reads: &Vec<Read>, samples: &Vec<String>) -> Vec<Haplotype> {
     if reads.is_empty() {
         debug!("No reads provided, returning empty haplotype set");
         return Vec::new();
     }
     info!("Initializing haplotypes from {} reads", reads.len());
     let sequence_length = reads[0].sequence.len();
-    let samples: HashSet<String> = reads.iter().map(|r| r.sample.clone()).collect();
-    debug!("Found {} unique samples", samples.len());
+    let samples_in_reads: HashSet<String> = reads.iter().map(|r| r.sample.clone()).collect();
+    debug!("Found {} unique samples", samples_in_reads.len());
 
     // Step 1: Create MAF (Major Allele Frequency) haplotype
     // This follows haplotype_Set_InitializeMAF logic
@@ -363,11 +363,11 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
         .into_iter()
         .map(|sequence| Haplotype {
             sequence,
-            frequencies: HashMap::new(),
+            frequencies: vec![0.0; samples.len()],
         })
         .collect();
 
-    for sample in &samples {
+    for (s_idx, _sample) in samples.iter().enumerate() {
         let mut freqs: Vec<f64> = (0..haplotypes.len()).map(|_| rng.gen::<f64>()).collect();
         let sum: f64 = freqs.iter().sum();
         if sum > 0.0 {
@@ -376,14 +376,14 @@ fn init_haplotypes(reads: &Vec<Read>) -> Vec<Haplotype> {
             }
         }
         for (i, haplotype) in haplotypes.iter_mut().enumerate() {
-            haplotype.frequencies.insert(sample.clone(), freqs[i]);
+            haplotype.frequencies[s_idx] = freqs[i];
         }
     }
     for (i, haplotype) in haplotypes.iter().enumerate() {
         let sequence_str = String::from_utf8_lossy(&haplotype.sequence);
         let mut freq_info = String::new();
-        for sample in &samples {
-            let freq = haplotype.frequencies.get(sample).unwrap_or(&0.0);
+        for (s_idx, sample) in samples.iter().enumerate() {
+            let freq = haplotype.frequencies.get(s_idx).unwrap_or(&0.0);
             if !freq_info.is_empty() {
                 freq_info.push_str(", ");
             }
@@ -552,7 +552,7 @@ impl HaplotypeEstimationProblem {
     ///
     /// * `haplotypes` - Vector of haplotypes to estimate frequencies for. Each haplotype contains:
     ///   - sequence: The nucleotide sequence
-    ///   - frequencies: HashMap mapping sample IDs to frequency estimates
+    ///   - frequencies: Vec<f64> aligned to `self.samples` order
     ///
     /// # Returns
     ///
@@ -586,7 +586,7 @@ impl HaplotypeEstimationProblem {
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
         // TODO: Parallel processing
-        for sample in &self.samples {
+        for (sample_idx, sample) in self.samples.iter().enumerate() {
             let sample_reads: Vec<(usize, &Read)> = self
                 .reads
                 .iter()
@@ -598,16 +598,18 @@ impl HaplotypeEstimationProblem {
             if num_haps <= 1 {
                 // For single haplotype, set frequency to 1.0
                 if num_haps == 1 {
-                    haplotypes[0].frequencies.insert(sample.clone(), 1.0);
+                    haplotypes[0].frequencies[sample_idx] = 1.0;
                 }
                 continue;
             }
             let mut theta_new: Vec<f64> = haplotypes
                 .iter()
                 .map(|hap| {
-                    match hap.frequencies.get(sample) {
-                        Some(&freq) if freq >= 0.01 => freq,
-                        _ => 0.01, // Initialize with small probability as in C code
+                    let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
+                    if f >= 0.01 {
+                        f
+                    } else {
+                        0.01
                     }
                 })
                 .collect();
@@ -803,7 +805,7 @@ impl HaplotypeEstimationProblem {
                 }
             }
             for (j, haplotype) in haplotypes.iter_mut().enumerate() {
-                haplotype.frequencies.insert(sample.clone(), theta_new[j]);
+                haplotype.frequencies[sample_idx] = theta_new[j];
             }
         }
 
@@ -811,12 +813,10 @@ impl HaplotypeEstimationProblem {
         let mut indices_to_remove = Vec::new();
         for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
             let mut non_zero = false;
-            for sample in &self.samples {
-                if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    if !freq.is_nan() && freq >= 0.005 {
-                        non_zero = true;
-                        break;
-                    }
+            for &freq in &haplotype.frequencies {
+                if !freq.is_nan() && freq >= 0.005 {
+                    non_zero = true;
+                    break;
                 }
             }
             if !non_zero {
@@ -829,10 +829,8 @@ impl HaplotypeEstimationProblem {
             let freq_str: Vec<String> = self
                 .samples
                 .iter()
-                .map(|sample| match haplotype.frequencies.get(sample) {
-                    Some(&freq) => format!("{}:{:.6}", sample, freq),
-                    None => format!("{}:0.000000", sample),
-                })
+                .enumerate()
+                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
                 .collect();
             trace!(
                 "Removing haplotype {}: sequence={}, frequencies=[{}]",
@@ -846,18 +844,14 @@ impl HaplotypeEstimationProblem {
             haplotypes.remove(idx);
         }
         // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
-        for sample in &self.samples {
+        for sample_idx in 0..self.samples.len() {
             let mut sum = 0.0;
             for haplotype in haplotypes.iter() {
-                if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    sum += freq;
-                }
+                sum += haplotype.frequencies[sample_idx];
             }
             if sum > 0.0 {
                 for haplotype in haplotypes.iter_mut() {
-                    if let Some(freq) = haplotype.frequencies.get_mut(sample) {
-                        *freq /= sum;
-                    }
+                    haplotype.frequencies[sample_idx] /= sum;
                 }
             }
         }
@@ -869,7 +863,7 @@ impl HaplotypeEstimationProblem {
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
-        for sample in &self.samples {
+        for (sample_idx, sample) in self.samples.iter().enumerate() {
             let sample_reads: Vec<(usize, &Read)> = self
                 .reads
                 .iter()
@@ -892,7 +886,7 @@ impl HaplotypeEstimationProblem {
             if num_haps <= 1 {
                 // For single haplotype, set frequency to 1.0
                 if num_haps == 1 {
-                    haplotypes[0].frequencies.insert(sample.clone(), 1.0);
+                    haplotypes[0].frequencies[sample_idx] = 1.0;
                 }
                 continue;
             }
@@ -900,9 +894,13 @@ impl HaplotypeEstimationProblem {
             // Initialize frequencies uniformly if not already set
             let mut theta: Vec<f64> = haplotypes
                 .iter()
-                .map(|hap| match hap.frequencies.get(sample) {
-                    Some(&freq) if freq >= 0.01 => freq,
-                    _ => 0.01,
+                .map(|hap| {
+                    let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
+                    if f >= 0.01 {
+                        f
+                    } else {
+                        0.01
+                    }
                 })
                 .collect();
 
@@ -1007,7 +1005,7 @@ impl HaplotypeEstimationProblem {
 
             // Store final frequencies
             for (j, haplotype) in haplotypes.iter_mut().enumerate() {
-                haplotype.frequencies.insert(sample.clone(), theta[j]);
+                haplotype.frequencies[sample_idx] = theta[j];
             }
         }
 
@@ -1015,12 +1013,10 @@ impl HaplotypeEstimationProblem {
         let mut indices_to_remove = Vec::new();
         for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
             let mut non_zero = false;
-            for sample in &self.samples {
-                if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    if !freq.is_nan() && freq >= 0.005 {
-                        non_zero = true;
-                        break;
-                    }
+            for &freq in &haplotype.frequencies {
+                if !freq.is_nan() && freq >= 0.005 {
+                    non_zero = true;
+                    break;
                 }
             }
             if !non_zero {
@@ -1034,18 +1030,14 @@ impl HaplotypeEstimationProblem {
         }
 
         // Rescale frequencies to sum to 1.0 for each sample
-        for sample in &self.samples {
+        for sample_idx in 0..self.samples.len() {
             let mut sum = 0.0;
             for haplotype in haplotypes.iter() {
-                if let Some(&freq) = haplotype.frequencies.get(sample) {
-                    sum += freq;
-                }
+                sum += haplotype.frequencies[sample_idx];
             }
             if sum > 0.0 {
                 for haplotype in haplotypes.iter_mut() {
-                    if let Some(freq) = haplotype.frequencies.get_mut(sample) {
-                        *freq /= sum;
-                    }
+                    haplotype.frequencies[sample_idx] /= sum;
                 }
             }
         }
@@ -1249,11 +1241,11 @@ impl HaplotypeEstimationProblem {
             debug!("Generated {} new unique sequences", new_sequences.len());
 
             for new_seq in new_sequences {
-                let mut combined_frequencies = HashMap::with_capacity(self.samples.len());
-                for sample in &self.samples {
-                    let freq1 = *haplotypes[idx1].frequencies.get(sample).unwrap_or(&0.0);
-                    let freq2 = *haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
-                    combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
+                let mut combined_frequencies = vec![0.0; self.samples.len()];
+                for s in 0..self.samples.len() {
+                    let freq1 = *haplotypes[idx1].frequencies.get(s).unwrap_or(&0.0);
+                    let freq2 = *haplotypes[idx2].frequencies.get(s).unwrap_or(&0.0);
+                    combined_frequencies[s] = (freq1 + freq2) / 4.0;
                 }
                 haplotypes.push(Haplotype {
                     sequence: new_seq,
@@ -1284,8 +1276,8 @@ impl HaplotypeEstimationProblem {
         if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
             debug!("Adding new mutated haplotype");
             let mut new_freqs = haplotypes[idx_to_copy].frequencies.clone();
-            for sample in &self.samples {
-                new_freqs.entry(sample.clone()).or_insert(0.0);
+            if new_freqs.len() < self.samples.len() {
+                new_freqs.resize(self.samples.len(), 0.0);
             }
             haplotypes.push(Haplotype {
                 sequence: new_sequence,
@@ -1335,25 +1327,20 @@ impl CostFunction for HaplotypeEstimationProblem {
     /// - Higher costs indicate worse solutions
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
         let mut total_cost = 0.0;
-        let reads_by_sample: HashMap<&String, Vec<(usize, &Read)>> = self
-            .reads
-            .iter()
-            .enumerate()
-            .map(|(idx, read)| (idx, read))
-            .fold(HashMap::new(), |mut acc, (idx, read)| {
-                acc.entry(&read.sample)
-                    .or_insert_with(Vec::new)
-                    .push((idx, read));
-                acc
-            });
-        for (sample, sample_reads) in &reads_by_sample {
-            for &(read_idx, read) in sample_reads {
+        for (sample_idx, sample) in self.samples.iter().enumerate() {
+            let sample_reads: Vec<(usize, &Read)> = self
+                .reads
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| &r.sample == sample)
+                .collect();
+            for &(read_idx, read) in &sample_reads {
                 let mut total_mismatch_probability = 0.0;
                 for haplotype in haplotypes.iter() {
                     // Use cached probability or calculate and cache it
                     let mismatches = self.cached_mismatches(read_idx, read, haplotype);
                     let probability = self.mismatch_probability(mismatches);
-                    let frequency = haplotype.frequencies.get(*sample).unwrap_or(&0.0);
+                    let frequency = *haplotype.frequencies.get(sample_idx).unwrap_or(&0.0);
                     total_mismatch_probability += probability * frequency;
                 }
                 if total_mismatch_probability > 0.0 {
@@ -1469,8 +1456,9 @@ fn propose_haplotypes(
     initial_haplotypes: &Vec<Haplotype>,
     optimization_parameters: OptimizationParameters,
 ) -> Vec<Haplotype> {
+    let samples = optimization_parameters.samples.clone();
     let problem = HaplotypeEstimationProblem {
-        samples: optimization_parameters.samples,
+        samples,
         reads: reads.to_vec(),
         error_rate: optimization_parameters.error_rate,
         lambda1: optimization_parameters.lambda1,
@@ -1579,20 +1567,14 @@ fn haplotype_frequencies_output(
     for haplotype in haplotypes {
         let restored_sequence = restore_invariants(&haplotype.sequence, invariant_positions);
         output.push_str(&String::from_utf8_lossy(&restored_sequence));
-        for sample in samples {
-            output.push_str(&format!(
-                ",{}",
-                haplotype.frequencies.get(sample).unwrap_or(&0.0)
-            ));
+        for s_idx in 0..samples.len() {
+            output.push_str(&format!(",{}", haplotype.frequencies[s_idx]));
         }
         output.push('\n');
     }
     output.push_str("SUM");
-    for sample in samples {
-        let sum: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get(sample).unwrap_or(&0.0))
-            .sum();
+    for s_idx in 0..samples.len() {
+        let sum: f64 = haplotypes.iter().map(|h| h.frequencies[s_idx]).sum();
         output.push_str(&format!(",{}", sum));
     }
     output.push('\n');
@@ -1625,7 +1607,7 @@ fn main() -> Result<()> {
     }
     let reads = extract_reads(&args.files);
     let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
-    let initial_haplotypes = init_haplotypes(&variant_only_reads);
+    let initial_haplotypes = init_haplotypes(&variant_only_reads, &args.files);
     if initial_haplotypes.len() == 1 && initial_haplotypes[0].sequence.is_empty() {
         eprintln!("No initial haplotypes that have meaningful information");
         exit(1);
@@ -1703,7 +1685,7 @@ mod tests {
                 }
                 Haplotype {
                     sequence,
-                    frequencies: HashMap::new(),
+                    frequencies: vec![],
                 }
             })
             .collect()
@@ -1891,18 +1873,18 @@ mod tests {
     fn test_single_read_no_blanks() {
         // FIXME: If there's no C(for example) in the column, then you don't need to put that in as a possability
         let reads = create_test_reads(vec!["ACGT"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         assert_eq!(haplotypes.len(), 1);
         assert_eq!(haplotypes[0].sequence, b"ACGT");
         assert_eq!(haplotypes[0].frequencies.len(), 1);
-        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+        assert!((haplotypes[0].frequencies[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_single_read_with_blanks() {
         let reads = create_test_reads(vec!["A-C"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // With new MAF-based logic, single read with gaps should create MAF haplotype
         // MAF at position 0: A (1 count), position 1: no valid nucleotides so defaults to T, position 2: C (1 count)
@@ -1910,13 +1892,13 @@ mod tests {
         assert_eq!(haplotypes.len(), 1);
         assert_eq!(haplotypes[0].sequence, b"ATC");
         assert_eq!(haplotypes[0].frequencies.len(), 1);
-        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+        assert!((haplotypes[0].frequencies[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_multiple_reads_no_blanks() {
         let reads = create_test_reads(vec!["ACGT", "TGCA"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // With new MAF-based logic:
         // MAF: pos 0: A=1,T=1 -> A (ties go to A), pos 1: C=1,G=1 -> A, pos 2: G=1,C=1 -> A, pos 3: T=1,A=1 -> A
@@ -1935,7 +1917,7 @@ mod tests {
     #[test]
     fn test_multiple_reads_with_blanks() {
         let reads = create_test_reads(vec!["A-C", "T-G"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // With new MAF-based logic:
         // MAF: pos 0: A=1,T=1 -> A (ties go to A), pos 1: gaps ignored, defaults to A, pos 2: C=1,G=1 -> A
@@ -1948,24 +1930,21 @@ mod tests {
         assert_eq!(haplotypes[0].frequencies.len(), 1);
 
         // Each haplotype should have uniform initial frequency
-        let freq_sum: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get("sample1").unwrap_or(&0.0))
-            .sum();
+        let freq_sum: f64 = haplotypes.iter().map(|h| h.frequencies[0]).sum();
         assert!((freq_sum - 1.0).abs() < 1e-10); // Should sum to 1.0
     }
 
     #[test]
     fn test_deduplication_of_haplotypes() {
         let reads = create_test_reads(vec!["A-C", "A-C"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // With new MAF-based logic, identical reads should still create just the MAF haplotype
         // Both reads contribute to MAF calculation: A at pos 0, C at pos 2, default T at pos 1
         assert_eq!(haplotypes.len(), 1);
         assert_eq!(haplotypes[0].sequence, b"ATC");
         assert_eq!(haplotypes[0].frequencies.len(), 1);
-        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+        assert!((haplotypes[0].frequencies[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -1980,7 +1959,8 @@ mod tests {
                 sample: "sample2".to_string(),
             },
         ];
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes =
+            init_haplotypes(&reads, &vec!["sample1".to_string(), "sample2".to_string()]);
 
         // With new MAF-based logic, all samples contribute to MAF calculation
         // MAF: pos 0: A=1,T=1 -> A, pos 1: gaps ignored -> A, pos 2: C=1,G=1 -> A
@@ -1991,19 +1971,12 @@ mod tests {
 
         // Check that each haplotype has frequencies for both samples
         for haplotype in &haplotypes {
-            assert!(haplotype.frequencies.contains_key("sample1"));
-            assert!(haplotype.frequencies.contains_key("sample2"));
+            assert_eq!(haplotype.frequencies.len(), 2);
         }
 
         // Frequencies should sum to 1.0 for each sample
-        let sample1_sum: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get("sample1").unwrap_or(&0.0))
-            .sum();
-        let sample2_sum: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get("sample2").unwrap_or(&0.0))
-            .sum();
+        let sample1_sum: f64 = haplotypes.iter().map(|h| h.frequencies[0]).sum();
+        let sample2_sum: f64 = haplotypes.iter().map(|h| h.frequencies[1]).sum();
 
         assert!((sample1_sum - 1.0).abs() < 1e-10);
         assert!((sample2_sum - 1.0).abs() < 1e-10);
@@ -2016,13 +1989,13 @@ mod tests {
     fn test_large_sequences_with_no_blanks() {
         let long_seq = "A".repeat(1000);
         let reads = create_test_reads(vec![&long_seq], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         assert_eq!(haplotypes.len(), 1);
         assert_eq!(haplotypes[0].sequence.len(), 1000);
         assert_eq!(haplotypes[0].sequence, long_seq.as_bytes());
         assert_eq!(haplotypes[0].frequencies.len(), 1);
-        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+        assert!((haplotypes[0].frequencies[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
@@ -2030,7 +2003,7 @@ mod tests {
     fn test_large_sequences_with_blanks() {
         let long_seq_with_blanks = format!("A{}C", "-".repeat(998));
         let reads = create_test_reads(vec![&long_seq_with_blanks], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         let expected_count = 4_usize.pow(998); // 998 blanks => 4^998 combinations
         assert_eq!(haplotypes.len(), expected_count);
@@ -2039,7 +2012,7 @@ mod tests {
     #[test]
     fn test_empty_reads() {
         let reads = create_test_reads(vec![], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         assert!(
             haplotypes.is_empty(),
@@ -2187,20 +2160,20 @@ mod tests {
     fn test_case_insensitive_sequence_handling() {
         // Test that sequences with different cases are treated as identical
         let reads = create_test_reads(vec!["acgt", "ACGT", "AcGt", "aCgT"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // All case variations should produce a single haplotype
         assert_eq!(haplotypes.len(), 1);
         assert_eq!(haplotypes[0].sequence, b"ACGT"); // Normalized to uppercase
         assert_eq!(haplotypes[0].frequencies.len(), 1);
-        assert_eq!(haplotypes[0].frequencies.get("sample1"), Some(&1.0));
+        assert!((haplotypes[0].frequencies[0] - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_mixed_case_sequences_with_differences() {
         // Test mixed case sequences that are actually different
         let reads = create_test_reads(vec!["acgt", "ACGT", "atgc", "ATGC"], "sample1");
-        let haplotypes = init_haplotypes(&reads);
+        let haplotypes = init_haplotypes(&reads, &vec!["sample1".to_string()]);
 
         // Should produce at least 2 haplotypes (may include MAF haplotype)
         assert!(haplotypes.len() >= 2);
@@ -2211,10 +2184,7 @@ mod tests {
         assert!(sequences.contains(&b"ATGC".to_vec()));
 
         // Check frequencies sum to 1.0
-        let total_freq: f64 = haplotypes
-            .iter()
-            .map(|h| h.frequencies.get("sample1").unwrap_or(&0.0))
-            .sum();
+        let total_freq: f64 = haplotypes.iter().map(|h| h.frequencies[0]).sum();
         assert!((total_freq - 1.0).abs() < 1e-10);
     }
 }

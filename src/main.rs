@@ -602,17 +602,6 @@ impl HaplotypeEstimationProblem {
                 }
                 continue;
             }
-            // Thetas are all haplotype frequencies
-            // Initialize frequencies uniformly if not already set
-            // Using the same minimum frequency logic as C code (0.01)
-            // First ensure all haplotypes have frequency data for ALL samples
-            for haplotype in haplotypes.iter_mut() {
-                for s in &self.samples {
-                    if !haplotype.frequencies.contains_key(s) {
-                        haplotype.frequencies.insert(s.clone(), 0.01);
-                    }
-                }
-            }
             let mut theta_new: Vec<f64> = haplotypes
                 .iter()
                 .map(|hap| {
@@ -622,7 +611,6 @@ impl HaplotypeEstimationProblem {
                     }
                 })
                 .collect();
-
             // Normalize initial frequencies to sum to 1.0
             let sum: f64 = theta_new.iter().sum();
             if sum > 0.0 {

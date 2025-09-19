@@ -1261,9 +1261,10 @@ impl HaplotypeEstimationProblem {
             debug!("Generated {} new unique sequences", new_sequences.len());
 
             for new_seq in new_sequences {
-                let mut combined_frequencies = HashMap::new();
-                for (sample, &freq1) in &haplotypes[idx1].frequencies {
-                    let freq2 = haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
+                let mut combined_frequencies = HashMap::with_capacity(self.samples.len());
+                for sample in &self.samples {
+                    let freq1 = *haplotypes[idx1].frequencies.get(sample).unwrap_or(&0.0);
+                    let freq2 = *haplotypes[idx2].frequencies.get(sample).unwrap_or(&0.0);
                     combined_frequencies.insert(sample.clone(), (freq1 + freq2) / 4.0);
                 }
                 haplotypes.push(Haplotype {
@@ -1294,9 +1295,13 @@ impl HaplotypeEstimationProblem {
         // Only add if this sequence doesn't already exist
         if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
             debug!("Adding new mutated haplotype");
+            let mut new_freqs = haplotypes[idx_to_copy].frequencies.clone();
+            for sample in &self.samples {
+                new_freqs.entry(sample.clone()).or_insert(0.0);
+            }
             haplotypes.push(Haplotype {
                 sequence: new_sequence,
-                frequencies: haplotypes[idx_to_copy].frequencies.clone(),
+                frequencies: new_freqs,
             });
         } else {
             debug!("Mutated sequence already exists, skipping addition");

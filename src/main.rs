@@ -524,13 +524,7 @@ impl HaplotypeEstimationProblem {
 
     /// Calculate mismatches between a read and haplotype using the global cache
     /// Uses content-based cache key that's immune to haplotype reordering
-    fn cached_mismatches(
-        &self,
-        read_idx: usize,
-        _haplotype_idx: usize,
-        read: &Read,
-        haplotype: &Haplotype,
-    ) -> usize {
+    fn cached_mismatches(&self, read_idx: usize, read: &Read, haplotype: &Haplotype) -> usize {
         let haplotype_hash = self.haplotype_hash(haplotype);
         let cache_key = (read_idx, haplotype_hash);
         let mut cache = self.mismatch_cache.borrow_mut();
@@ -643,9 +637,8 @@ impl HaplotypeEstimationProblem {
                 .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
-                        .enumerate()
-                        .map(|(j, hap)| {
-                            let count = self.cached_mismatches(read_idx, j, read, hap);
+                        .map(|hap| {
+                            let count = self.cached_mismatches(read_idx, read, hap);
                             self.mismatch_probability(count)
                         })
                         .collect()
@@ -939,9 +932,8 @@ impl HaplotypeEstimationProblem {
                 .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
-                        .enumerate()
-                        .map(|(j, hap)| {
-                            let count = self.cached_mismatches(read_idx, j, read, hap);
+                        .map(|hap| {
+                            let count = self.cached_mismatches(read_idx, read, hap);
                             self.mismatch_probability(count)
                         })
                         .collect()
@@ -1362,17 +1354,11 @@ impl CostFunction for HaplotypeEstimationProblem {
                 acc
             });
         for (sample, sample_reads) in &reads_by_sample {
-            // Find haplotypes for this sample once
-            let sample_haplotypes: Vec<(usize, &Haplotype)> = haplotypes
-                .iter()
-                .enumerate()
-                .filter(|(_, h)| h.frequencies.contains_key(*sample))
-                .collect();
             for &(read_idx, read) in sample_reads {
                 let mut total_mismatch_probability = 0.0;
-                for &(hap_idx, haplotype) in &sample_haplotypes {
+                for haplotype in haplotypes.iter() {
                     // Use cached probability or calculate and cache it
-                    let mismatches = self.cached_mismatches(read_idx, hap_idx, read, haplotype);
+                    let mismatches = self.cached_mismatches(read_idx, read, haplotype);
                     let probability = self.mismatch_probability(mismatches);
                     let frequency = haplotype.frequencies.get(*sample).unwrap_or(&0.0);
                     total_mismatch_probability += probability * frequency;

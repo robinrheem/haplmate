@@ -613,11 +613,7 @@ impl HaplotypeEstimationProblem {
                 .iter()
                 .map(|hap| {
                     let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                    if f >= 0.01 {
-                        f
-                    } else {
-                        0.01
-                    }
+                    f64::max(1e-10, f)
                 })
                 .collect();
             // Normalize initial frequencies to sum to 1.0
@@ -820,6 +816,49 @@ impl HaplotypeEstimationProblem {
             }
             for (j, haplotype) in haplotypes.iter_mut().enumerate() {
                 haplotype.frequencies[sample_idx] = theta_new[j];
+            }
+        }
+        // Remove haplotypes with zero frequencies across all samples
+        let mut indices_to_remove = Vec::new();
+        for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
+            if !haplotype
+                .frequencies
+                .iter()
+                .any(|&freq| !freq.is_nan() && freq >= 0.005)
+            {
+                indices_to_remove.push(hap_idx);
+            }
+        }
+        // Log haplotypes being removed
+        for &idx in &indices_to_remove {
+            let haplotype = &haplotypes[idx];
+            let freq_str: Vec<String> = self
+                .samples
+                .iter()
+                .enumerate()
+                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
+                .collect();
+            trace!(
+                "Removing haplotype {}: sequence={}, frequencies=[{}]",
+                idx,
+                String::from_utf8_lossy(&haplotype.sequence),
+                freq_str.join(", ")
+            );
+        }
+        // Remove haplotypes in reverse order to maintain correct indices
+        for &idx in indices_to_remove.iter().rev() {
+            haplotypes.remove(idx);
+        }
+        // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
+        for sample_idx in 0..self.samples.len() {
+            let mut sum = 0.0;
+            for haplotype in haplotypes.iter() {
+                sum += haplotype.frequencies[sample_idx];
+            }
+            if sum > 0.0 {
+                for haplotype in haplotypes.iter_mut() {
+                    haplotype.frequencies[sample_idx] /= sum;
+                }
             }
         }
         Ok(())
@@ -1399,7 +1438,7 @@ impl Anneal for HaplotypeEstimationProblem {
                 continue;
             }
             debug!("Running EM optimization on {} haplotypes", haplotypes.len());
-            self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+            self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
             if !haplotypes.is_empty() {
                 debug!(
                     "Annealing step complete, returning {} haplotypes",
@@ -1488,7 +1527,8 @@ fn propose_haplotypes(
     let sa_progress = optimization_parameters.sa_max_temperature;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
-    if let Err(e) = problem.expectation_maximization(&mut best_haplotypes, convergence_delta) {
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
+    {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e

@@ -154,7 +154,6 @@ fn remove_invariants(reads: &Vec<Read>) -> (Vec<Read>, Vec<(usize, u8)>) {
             filtered_sequences[j].push(c);
         }
     }
-
     let filtered_reads = reads
         .iter()
         .enumerate()
@@ -484,7 +483,7 @@ struct HaplotypeEstimationProblem {
     original_read_length: usize,
     seed: Option<u64>,
     // Key: (read_idx, haplotype_hash) to make cache immune to haplotype reordering
-    mismatch_cache: RefCell<HashMap<(usize, u64), usize>>,
+    mismatch_prob_cache: RefCell<HashMap<(usize, u64), f64>>,
 }
 
 impl HaplotypeEstimationProblem {
@@ -524,17 +523,28 @@ impl HaplotypeEstimationProblem {
 
     /// Calculate mismatches between a read and haplotype using the global cache
     /// Uses content-based cache key that's immune to haplotype reordering
-    fn cached_mismatches(&self, read_idx: usize, read: &Read, haplotype: &Haplotype) -> usize {
+    fn cached_mismatch_probability(
+        &self,
+        read_idx: usize,
+        read: &Read,
+        haplotype: &Haplotype,
+    ) -> f64 {
         let haplotype_hash = self.haplotype_hash(haplotype);
         let cache_key = (read_idx, haplotype_hash);
-        let mut cache = self.mismatch_cache.borrow_mut();
-        *cache.entry(cache_key).or_insert_with(|| {
-            read.sequence
-                .iter()
-                .zip(&haplotype.sequence)
-                .filter(|(&r, &h)| r != h && r != b'-')
-                .count()
-        })
+        if let Some(prob) = self.mismatch_prob_cache.borrow().get(&cache_key) {
+            return *prob;
+        }
+        let mismatches = read
+            .sequence
+            .iter()
+            .zip(&haplotype.sequence)
+            .filter(|(&r, &h)| r != h && r != b'-')
+            .count();
+        let prob = self.mismatch_probability(mismatches);
+        self.mismatch_prob_cache
+            .borrow_mut()
+            .insert(cache_key, prob);
+        prob
     }
 
     /// Performs the Square Expectation-Maximization algorithm to estimate haplotype frequencies.
@@ -595,11 +605,8 @@ impl HaplotypeEstimationProblem {
                 .collect();
             let num_reads = sample_reads.len();
             let num_haps = haplotypes.len();
-            if num_haps <= 1 {
-                // For single haplotype, set frequency to 1.0
-                if num_haps == 1 {
-                    haplotypes[0].frequencies[sample_idx] = 1.0;
-                }
+            if num_haps == 1 {
+                haplotypes[0].frequencies[sample_idx] = 1.0;
                 continue;
             }
             let mut theta_new: Vec<f64> = haplotypes
@@ -627,10 +634,7 @@ impl HaplotypeEstimationProblem {
                 .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
-                        .map(|hap| {
-                            let count = self.cached_mismatches(read_idx, read, hap);
-                            self.mismatch_probability(count)
-                        })
+                        .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
                         .collect()
                 })
                 .collect();
@@ -756,7 +760,17 @@ impl HaplotypeEstimationProblem {
                     theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
                     // Parameter projection
                     theta_new[j] = f64::max(0.01, theta_new[j]);
-                    for i in 0..num_reads {
+                }
+                // Renormalize to the simplex after projection to keep a valid mixture
+                let sum_theta: f64 = theta_new.iter().sum();
+                if sum_theta > 0.0 {
+                    for val in theta_new.iter_mut() {
+                        *val /= sum_theta;
+                    }
+                }
+                // Recompute mismatch_fp_new using the normalized theta
+                for i in 0..num_reads {
+                    for j in 0..num_haps {
                         mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
                     }
                 }
@@ -808,57 +822,10 @@ impl HaplotypeEstimationProblem {
                 haplotype.frequencies[sample_idx] = theta_new[j];
             }
         }
-
-        // Remove haplotypes with zero frequencies across all samples
-        let mut indices_to_remove = Vec::new();
-        for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
-            let mut non_zero = false;
-            for &freq in &haplotype.frequencies {
-                if !freq.is_nan() && freq >= 0.005 {
-                    non_zero = true;
-                    break;
-                }
-            }
-            if !non_zero {
-                indices_to_remove.push(hap_idx);
-            }
-        }
-        // Log haplotypes being removed
-        for &idx in &indices_to_remove {
-            let haplotype = &haplotypes[idx];
-            let freq_str: Vec<String> = self
-                .samples
-                .iter()
-                .enumerate()
-                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
-                .collect();
-            trace!(
-                "Removing haplotype {}: sequence={}, frequencies=[{}]",
-                idx,
-                String::from_utf8_lossy(&haplotype.sequence),
-                freq_str.join(", ")
-            );
-        }
-        // Remove haplotypes in reverse order to maintain correct indices
-        for &idx in indices_to_remove.iter().rev() {
-            haplotypes.remove(idx);
-        }
-        // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
-        for sample_idx in 0..self.samples.len() {
-            let mut sum = 0.0;
-            for haplotype in haplotypes.iter() {
-                sum += haplotype.frequencies[sample_idx];
-            }
-            if sum > 0.0 {
-                for haplotype in haplotypes.iter_mut() {
-                    haplotype.frequencies[sample_idx] /= sum;
-                }
-            }
-        }
         Ok(())
     }
 
-    fn _expectation_maximization(
+    fn expectation_maximization(
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
@@ -882,25 +849,16 @@ impl HaplotypeEstimationProblem {
                 }
                 likelihood
             };
-
-            if num_haps <= 1 {
-                // For single haplotype, set frequency to 1.0
-                if num_haps == 1 {
-                    haplotypes[0].frequencies[sample_idx] = 1.0;
-                }
+            if num_haps == 1 {
+                haplotypes[0].frequencies[sample_idx] = 1.0;
                 continue;
             }
-
             // Initialize frequencies uniformly if not already set
             let mut theta: Vec<f64> = haplotypes
                 .iter()
                 .map(|hap| {
                     let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                    if f >= 0.01 {
-                        f
-                    } else {
-                        0.01
-                    }
+                    f64::max(1e-10, f)
                 })
                 .collect();
 
@@ -918,10 +876,7 @@ impl HaplotypeEstimationProblem {
                 .map(|&(read_idx, read)| {
                     haplotypes
                         .iter()
-                        .map(|hap| {
-                            let count = self.cached_mismatches(read_idx, read, hap);
-                            self.mismatch_probability(count)
-                        })
+                        .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
                         .collect()
                 })
                 .collect();
@@ -1008,42 +963,9 @@ impl HaplotypeEstimationProblem {
                 haplotype.frequencies[sample_idx] = theta[j];
             }
         }
-
-        // Remove haplotypes with zero frequencies across all samples
-        let mut indices_to_remove = Vec::new();
-        for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
-            let mut non_zero = false;
-            for &freq in &haplotype.frequencies {
-                if !freq.is_nan() && freq >= 0.005 {
-                    non_zero = true;
-                    break;
-                }
-            }
-            if !non_zero {
-                indices_to_remove.push(hap_idx);
-            }
-        }
-
-        // Remove haplotypes in reverse order to maintain correct indices
-        for &idx in indices_to_remove.iter().rev() {
-            haplotypes.remove(idx);
-        }
-
-        // Rescale frequencies to sum to 1.0 for each sample
-        for sample_idx in 0..self.samples.len() {
-            let mut sum = 0.0;
-            for haplotype in haplotypes.iter() {
-                sum += haplotype.frequencies[sample_idx];
-            }
-            if sum > 0.0 {
-                for haplotype in haplotypes.iter_mut() {
-                    haplotype.frequencies[sample_idx] /= sum;
-                }
-            }
-        }
-
         Ok(())
     }
+
     /// Calculates the minimum number of recombination events required to explain the given set of haplotypes
     /// using the Four Gamete Test (FGT) method.
     ///
@@ -1338,8 +1260,7 @@ impl CostFunction for HaplotypeEstimationProblem {
                 let mut total_mismatch_probability = 0.0;
                 for haplotype in haplotypes.iter() {
                     // Use cached probability or calculate and cache it
-                    let mismatches = self.cached_mismatches(read_idx, read, haplotype);
-                    let probability = self.mismatch_probability(mismatches);
+                    let probability = self.cached_mismatch_probability(read_idx, read, haplotype);
                     let frequency = *haplotype.frequencies.get(sample_idx).unwrap_or(&0.0);
                     total_mismatch_probability += probability * frequency;
                 }
@@ -1418,7 +1339,52 @@ impl Anneal for HaplotypeEstimationProblem {
                 continue;
             }
             debug!("Running EM optimization on {} haplotypes", haplotypes.len());
-            self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+            self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+            // Remove haplotypes with zero frequencies across all samples
+            let mut indices_to_remove = Vec::new();
+            for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
+                if !haplotype
+                    .frequencies
+                    .iter()
+                    .any(|&freq| !freq.is_nan() && freq >= 0.005)
+                {
+                    indices_to_remove.push(hap_idx);
+                }
+            }
+            // Log haplotypes being removed
+            for &idx in &indices_to_remove {
+                let haplotype = &haplotypes[idx];
+                let freq_str: Vec<String> = self
+                    .samples
+                    .iter()
+                    .enumerate()
+                    .map(|(s_idx, sample)| {
+                        format!("{}:{:.6}", sample, haplotype.frequencies[s_idx])
+                    })
+                    .collect();
+                trace!(
+                    "Removing haplotype {}: sequence={}, frequencies=[{}]",
+                    idx,
+                    String::from_utf8_lossy(&haplotype.sequence),
+                    freq_str.join(", ")
+                );
+            }
+            // Remove haplotypes in reverse order to maintain correct indices
+            for &idx in indices_to_remove.iter().rev() {
+                haplotypes.remove(idx);
+            }
+            // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
+            for sample_idx in 0..self.samples.len() {
+                let mut sum = 0.0;
+                for haplotype in haplotypes.iter() {
+                    sum += haplotype.frequencies[sample_idx];
+                }
+                if sum > 0.0 {
+                    for haplotype in haplotypes.iter_mut() {
+                        haplotype.frequencies[sample_idx] /= sum;
+                    }
+                }
+            }
             if !haplotypes.is_empty() {
                 debug!(
                     "Annealing step complete, returning {} haplotypes",
@@ -1469,7 +1435,7 @@ fn propose_haplotypes(
         sa_max_temperature: optimization_parameters.sa_max_temperature,
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
-        mismatch_cache: RefCell::new(HashMap::new()),
+        mismatch_prob_cache: RefCell::new(HashMap::new()),
     };
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
@@ -1704,7 +1670,7 @@ mod tests {
             sa_max_temperature: 10.0,
             original_read_length: 100,
             seed: Some(12345),
-            mismatch_cache: RefCell::new(HashMap::new()),
+            mismatch_prob_cache: RefCell::new(HashMap::new()),
         }
     }
 

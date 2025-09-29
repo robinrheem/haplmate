@@ -963,6 +963,49 @@ impl HaplotypeEstimationProblem {
                 haplotype.frequencies[sample_idx] = theta[j];
             }
         }
+        // Remove haplotypes with zero frequencies across all samples
+        let mut indices_to_remove = Vec::new();
+        for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
+            if !haplotype
+                .frequencies
+                .iter()
+                .any(|&freq| !freq.is_nan() && freq >= 0.005)
+            {
+                indices_to_remove.push(hap_idx);
+            }
+        }
+        // Log haplotypes being removed
+        for &idx in &indices_to_remove {
+            let haplotype = &haplotypes[idx];
+            let freq_str: Vec<String> = self
+                .samples
+                .iter()
+                .enumerate()
+                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
+                .collect();
+            trace!(
+                "Removing haplotype {}: sequence={}, frequencies=[{}]",
+                idx,
+                String::from_utf8_lossy(&haplotype.sequence),
+                freq_str.join(", ")
+            );
+        }
+        // Remove haplotypes in reverse order to maintain correct indices
+        for &idx in indices_to_remove.iter().rev() {
+            haplotypes.remove(idx);
+        }
+        // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
+        for sample_idx in 0..self.samples.len() {
+            let mut sum = 0.0;
+            for haplotype in haplotypes.iter() {
+                sum += haplotype.frequencies[sample_idx];
+            }
+            if sum > 0.0 {
+                for haplotype in haplotypes.iter_mut() {
+                    haplotype.frequencies[sample_idx] /= sum;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1340,51 +1383,6 @@ impl Anneal for HaplotypeEstimationProblem {
             }
             debug!("Running EM optimization on {} haplotypes", haplotypes.len());
             self.expectation_maximization(&mut haplotypes, convergence_delta)?;
-            // Remove haplotypes with zero frequencies across all samples
-            let mut indices_to_remove = Vec::new();
-            for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
-                if !haplotype
-                    .frequencies
-                    .iter()
-                    .any(|&freq| !freq.is_nan() && freq >= 0.005)
-                {
-                    indices_to_remove.push(hap_idx);
-                }
-            }
-            // Log haplotypes being removed
-            for &idx in &indices_to_remove {
-                let haplotype = &haplotypes[idx];
-                let freq_str: Vec<String> = self
-                    .samples
-                    .iter()
-                    .enumerate()
-                    .map(|(s_idx, sample)| {
-                        format!("{}:{:.6}", sample, haplotype.frequencies[s_idx])
-                    })
-                    .collect();
-                trace!(
-                    "Removing haplotype {}: sequence={}, frequencies=[{}]",
-                    idx,
-                    String::from_utf8_lossy(&haplotype.sequence),
-                    freq_str.join(", ")
-                );
-            }
-            // Remove haplotypes in reverse order to maintain correct indices
-            for &idx in indices_to_remove.iter().rev() {
-                haplotypes.remove(idx);
-            }
-            // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
-            for sample_idx in 0..self.samples.len() {
-                let mut sum = 0.0;
-                for haplotype in haplotypes.iter() {
-                    sum += haplotype.frequencies[sample_idx];
-                }
-                if sum > 0.0 {
-                    for haplotype in haplotypes.iter_mut() {
-                        haplotype.frequencies[sample_idx] /= sum;
-                    }
-                }
-            }
             if !haplotypes.is_empty() {
                 debug!(
                     "Annealing step complete, returning {} haplotypes",

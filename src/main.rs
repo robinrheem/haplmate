@@ -1473,8 +1473,7 @@ fn propose_haplotypes(
     let sa_progress = optimization_parameters.sa_max_temperature;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
-    {
+    if let Err(e) = problem.expectation_maximization(&mut best_haplotypes, convergence_delta) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e

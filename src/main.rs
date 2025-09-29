@@ -1202,9 +1202,14 @@ impl HaplotypeEstimationProblem {
                 trace!("Adding second recombined sequence");
                 new_sequences.push(recombined2);
             }
-
             debug!("Generated {} new unique sequences", new_sequences.len());
-
+            // Must generate exactly 2 new sequences, otherwise retry
+            if new_sequences.len() != 2 {
+                trace!("Did not generate 2 new sequences, retrying with different indices");
+                idx2 = rng.gen_range(0..haplotypes.len());
+                attempts += 1;
+                continue;
+            }
             for new_seq in new_sequences {
                 let mut combined_frequencies = vec![0.0; self.samples.len()];
                 for s in 0..self.samples.len() {

@@ -1210,7 +1210,7 @@ impl HaplotypeEstimationProblem {
                 for s in 0..self.samples.len() {
                     let freq1 = *haplotypes[idx1].frequencies.get(s).unwrap_or(&0.0);
                     let freq2 = *haplotypes[idx2].frequencies.get(s).unwrap_or(&0.0);
-                    combined_frequencies[s] = (freq1 + freq2) / 4.0;
+                    combined_frequencies[s] = (freq1 + freq2) / 2.0;
                 }
                 haplotypes.push(Haplotype {
                     sequence: new_seq,
@@ -1224,32 +1224,44 @@ impl HaplotypeEstimationProblem {
     /// Applies mutation operation to create a new haplotype
     fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
         let idx_to_copy = rng.gen_range(0..haplotypes.len());
-        let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
-        let pos_to_change = rng.gen_range(0..new_sequence.len());
-        let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
-
-        trace!(
-            "Mutating haplotype {} at position {} to {}",
-            idx_to_copy,
-            pos_to_change,
-            new_nucleotide as char
-        );
-
-        new_sequence[pos_to_change] = new_nucleotide;
-
-        // Only add if this sequence doesn't already exist
-        if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
-            debug!("Adding new mutated haplotype");
-            let mut new_freqs = haplotypes[idx_to_copy].frequencies.clone();
-            if new_freqs.len() < self.samples.len() {
-                new_freqs.resize(self.samples.len(), 0.0);
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: usize = 100;
+        loop {
+            if attempts >= MAX_ATTEMPTS {
+                debug!(
+                    "Failed to generate unique mutated haplotype after {} attempts",
+                    MAX_ATTEMPTS
+                );
+                break;
             }
-            haplotypes.push(Haplotype {
-                sequence: new_sequence,
-                frequencies: new_freqs,
-            });
-        } else {
-            debug!("Mutated sequence already exists, skipping addition");
+            let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
+            let pos_to_change = rng.gen_range(0..new_sequence.len());
+            let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
+            trace!(
+                "Mutating haplotype {} at position {} to {} (attempt {})",
+                idx_to_copy,
+                pos_to_change,
+                new_nucleotide as char,
+                attempts + 1
+            );
+            new_sequence[pos_to_change] = new_nucleotide;
+            // Only add if this sequence doesn't already exist
+            if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
+                debug!("Adding new mutated haplotype");
+                // Halve the frequencies for the original haplotype
+                for freq in &mut haplotypes[idx_to_copy].frequencies {
+                    *freq /= 2.0;
+                }
+                let new_freqs = haplotypes[idx_to_copy].frequencies.clone();
+                haplotypes.push(Haplotype {
+                    sequence: new_sequence,
+                    frequencies: new_freqs,
+                });
+                break;
+            } else {
+                trace!("Mutated sequence already exists, trying again");
+                attempts += 1;
+            }
         }
     }
 }

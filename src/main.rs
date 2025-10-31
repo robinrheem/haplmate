@@ -1617,7 +1617,9 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)
         .init();
-    let args = Args::parse();
+    let mut args = Args::parse();
+    args.files.sort_by(|a, b| natord::compare(a, b));
+
     let unaligned = unaligned_samples(&args.files)?;
     if !unaligned.is_empty() {
         unaligned

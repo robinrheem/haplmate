@@ -1,9 +1,6 @@
 use ahash::AHasher;
 use anyhow::Result;
-use argmin::core::{
-    observers::{Observe, ObserverMode},
-    CostFunction, Error, Executor, State, KV,
-};
+use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
 use dashmap::DashMap;
 use rand::prelude::*;
@@ -397,35 +394,6 @@ fn init_haplotypes(reads: &Vec<Read>, samples: &Vec<String>) -> Vec<Haplotype> {
         haplotypes.len()
     );
     haplotypes
-}
-
-/// Simple observer to log simulated annealing acceptance/rejection
-#[derive(Clone)]
-struct SALogger;
-
-impl SALogger {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl<I> Observe<I> for SALogger
-where
-    I: State<Float = f64>,
-{
-    fn observe_iter(&mut self, state: &I, kv: &KV) -> Result<(), Error> {
-        let current_cost = state.get_cost();
-
-        if let Some(accepted) = kv.get("acc") {
-            if accepted.get_bool().unwrap_or(false) {
-                info!("SA: ACCEPTED cost = {:.6}", current_cost);
-            } else {
-                info!("SA: REJECTED cost = {:.6}", current_cost);
-            }
-        }
-
-        Ok(())
-    }
 }
 
 /// Restore invariant positions to a sequence
@@ -1552,10 +1520,6 @@ fn propose_haplotypes(
     );
     let mut best_objective = f64::INFINITY;
     let mut best_likelihood = f64::INFINITY;
-
-    // Create observer to log SA acceptance/rejection
-    let observer = SALogger::new();
-
     for i in 0..optimization_parameters.sa_reruns {
         info!(
             "Running SA with {} haplotypes, iteration {}",
@@ -1564,7 +1528,6 @@ fn propose_haplotypes(
         );
         let result = Executor::new(problem.clone(), solver.clone())
             .configure(|state| state.param(best_haplotypes.clone()))
-            .add_observer(observer.clone(), ObserverMode::Always)
             .run()
             .unwrap();
         let best_cost = result.state().best_cost;

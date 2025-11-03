@@ -609,224 +609,222 @@ impl HaplotypeEstimationProblem {
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
-        // TODO: Parallel processing
-        for (sample_idx, _sample) in self.samples.iter().enumerate() {
-            let sample_read_indices = &self.reads_by_sample[sample_idx];
-            let num_reads = sample_read_indices.len();
-            let num_haps = haplotypes.len();
-            if num_haps == 1 {
-                haplotypes[0].frequencies[sample_idx] = 1.0;
-                continue;
-            }
-            let mut theta_new: Vec<f64> = haplotypes
-                .iter()
-                .map(|hap| {
-                    let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                    f64::max(1e-10, f)
-                })
-                .collect();
-            // Normalize initial frequencies to sum to 1.0
-            let sum: f64 = theta_new.iter().sum();
-            if sum > 0.0 {
-                for val in theta_new.iter_mut() {
-                    *val /= sum;
+        let num_haps = haplotypes.len();
+        // Process all samples in parallel - each sample is completely independent
+        // Collect frequency results: Vec<Vec<f64>> where outer = samples, inner = haplotype freqs
+        let sample_frequencies: Vec<Vec<f64>> = self
+            .samples
+            .par_iter()
+            .enumerate()
+            .map(|(sample_idx, _sample)| {
+                let sample_read_indices = &self.reads_by_sample[sample_idx];
+                let num_reads = sample_read_indices.len();
+                if num_haps == 1 {
+                    return vec![1.0];
                 }
-            }
-
-            // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
-            // Parallelize this expensive operation for better performance with large datasets
-            let mismatches: Vec<Vec<f64>> = sample_read_indices
-                .par_iter()
-                .map(|&read_idx| {
-                    let read = &self.reads[read_idx];
-                    haplotypes
-                        .iter()
-                        .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
-                        .collect()
-                })
-                .collect();
-
-            // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
-            let mut mismatch_fp_new = mismatches
-                .iter()
-                .map(|row| row.iter().zip(&theta_new).map(|(&m, &t)| m * t).collect())
-                .collect();
-
-            // SQUAREM algorithm parameters, matching C code
-            let mut step_min = 1.0;
-            let mut step_max = 1.0;
-            let step_max_d = 1.0;
-            let mstep = 4.0;
-            let tol = convergence_delta * 0.1; // Same scaling as in C
-            let lik_increase = 0.0; // original: 1.0
-
-            // Create intermediate vectors for SQUAREM
-            let mut theta_1 = vec![0.0; num_haps];
-            let mut theta_2 = vec![0.0; num_haps];
-            let mut r = vec![0.0; num_haps];
-            let mut v = vec![0.0; num_haps];
-
-            // Create intermediate matrices for SQUAREM
-            let mut mismatch_fp_1 = vec![vec![0.0; num_haps]; num_reads];
-            let mut mismatch_fp_2 = vec![vec![0.0; num_haps]; num_reads];
-
-            // Hoist memberships allocation to avoid re-allocation in every EM update
-            let mut memberships = vec![vec![0.0; num_haps]; num_reads];
-            // EM update closure - equivalent to sqEMUpdate in C
-            let mut em_update =
-                |mismatch_fp_in: &Vec<Vec<f64>>,
-                 theta_out: &mut [f64],
-                 mismatch_fp_out: &mut Vec<Vec<f64>>| {
-                    // E-step: Calculate memberships (normalized probabilities)
-                    for i in 0..num_reads {
-                        let denom: f64 = mismatch_fp_in[i].iter().sum();
-                        if denom > 0.0 {
-                            for j in 0..num_haps {
-                                memberships[i][j] = mismatch_fp_in[i][j] / denom;
-                            }
-                        } else {
-                            // clear row if denom is 0 to avoid using stale values
-                            memberships[i].iter_mut().for_each(|m| *m = 0.0);
-                        }
-                    }
-                    // M-step: Update frequencies based on memberships
-                    for j in 0..num_haps {
-                        theta_out[j] = 0.0;
-                        for i in 0..num_reads {
-                            theta_out[j] += memberships[i][j];
-                        }
-                        theta_out[j] /= num_reads as f64;
-                        // Update mismatch_fp with new frequencies
-                        for i in 0..num_reads {
-                            mismatch_fp_out[i][j] = mismatches[i][j] * theta_out[j];
-                        }
-                    }
-                };
-
-            // Calculate likelihood closure - equivalent to EM_likelihood_sq in C
-            let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
-                let mut likelihood = 0.0;
-                for i in 0..num_reads {
-                    let row_sum: f64 = mismatch_fp[i].iter().sum();
-                    if row_sum > 0.0 {
-                        likelihood += row_sum.ln();
-                    }
-                }
-                likelihood
-            };
-
-            // Initial likelihood calculation
-            let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
-            let mut likelihood_new = likelihood_old;
-            let mut iters = 0;
-
-            // Main EM loop
-            while iters < self.em_iterations {
-                // Update likelihood_old if new one is valid
-                if !likelihood_new.is_infinite() && !likelihood_new.is_nan() {
-                    likelihood_old = likelihood_new;
-                }
-                // First EM update: theta_0 -> theta_1
-                em_update(&mismatch_fp_new, &mut theta_1, &mut mismatch_fp_1);
-                // Second EM update: theta_1 -> theta_2
-                em_update(&mismatch_fp_1, &mut theta_2, &mut mismatch_fp_2);
-                iters += 2;
-
-                // Calculate step vectors and norms
-                let mut rsq = 0.0;
-                let mut vsq = 0.0;
-                let mut v2sq = 0.0;
-
-                for j in 0..num_haps {
-                    r[j] = theta_1[j] - theta_new[j];
-                    rsq += r[j] * r[j];
-                    v[j] = (theta_2[j] - theta_1[j]) - r[j];
-                    vsq += v[j] * v[j];
-                    v2sq += (theta_2[j] - theta_1[j]) * (theta_2[j] - theta_1[j]);
-                }
-
-                // Early convergence check based on tolerance
-                if rsq.sqrt() < tol {
-                    // theta_0 and theta_1 tolerance - use theta_1 results
-                    theta_new.copy_from_slice(&theta_1);
-                    break;
-                } else if v2sq.sqrt() < tol {
-                    // theta_1 and theta_2 tolerance - use theta_2 results
-                    theta_new.copy_from_slice(&theta_2);
-                    break;
-                }
-
-                // SQUAREM acceleration step - carefully follow C implementation
-                let mut alpha = f64::max(step_min, f64::min(step_max, (rsq / vsq).sqrt()));
-                if alpha.is_nan() || alpha.is_infinite() {
-                    alpha = 1.0; // Fallback to regular EM step
-                }
-                // Compute accelerated parameter estimates - following C logic
-                // Directly update frequencies first without updating mismatch_fp
-                for j in 0..num_haps {
-                    theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
-                    // Parameter projection
-                    theta_new[j] = f64::max(0.01, theta_new[j]);
-                }
-                // Renormalize to the simplex after projection to keep a valid mixture
-                let sum_theta: f64 = theta_new.iter().sum();
-                if sum_theta > 0.0 {
+                // Initialize theta from current haplotype frequencies (read-only)
+                let mut theta_new: Vec<f64> = haplotypes
+                    .iter()
+                    .map(|hap| {
+                        let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
+                        f64::max(1e-10, f)
+                    })
+                    .collect();
+                // Normalize initial frequencies to sum to 1.0
+                let sum: f64 = theta_new.iter().sum();
+                if sum > 0.0 {
                     for val in theta_new.iter_mut() {
-                        *val /= sum_theta;
+                        *val /= sum;
                     }
                 }
-                // Recompute mismatch_fp_new using the normalized theta
-                for i in 0..num_reads {
+                // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
+                // Parallelize this expensive operation for better performance with large datasets
+                let mismatches: Vec<Vec<f64>> = sample_read_indices
+                    .par_iter()
+                    .map(|&read_idx| {
+                        let read = &self.reads[read_idx];
+                        haplotypes
+                            .iter()
+                            .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
+                            .collect()
+                    })
+                    .collect();
+                // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
+                let mut mismatch_fp_new = mismatches
+                    .iter()
+                    .map(|row| row.iter().zip(&theta_new).map(|(&m, &t)| m * t).collect())
+                    .collect();
+
+                // SQUAREM algorithm parameters, matching C code
+                let mut step_min = 1.0;
+                let mut step_max = 1.0;
+                let step_max_d = 1.0;
+                let mstep = 4.0;
+                let tol = convergence_delta * 0.1; // Same scaling as in C
+                let lik_increase = 0.0; // original: 1.0
+
+                // Create intermediate vectors for SQUAREM
+                let mut theta_1 = vec![0.0; num_haps];
+                let mut theta_2 = vec![0.0; num_haps];
+                let mut r = vec![0.0; num_haps];
+                let mut v = vec![0.0; num_haps];
+
+                // Create intermediate matrices for SQUAREM
+                let mut mismatch_fp_1 = vec![vec![0.0; num_haps]; num_reads];
+                let mut mismatch_fp_2 = vec![vec![0.0; num_haps]; num_reads];
+
+                // Hoist memberships allocation to avoid re-allocation in every EM update
+                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
+                // EM update closure - equivalent to sqEMUpdate in C
+                let mut em_update =
+                    |mismatch_fp_in: &Vec<Vec<f64>>,
+                     theta_out: &mut [f64],
+                     mismatch_fp_out: &mut Vec<Vec<f64>>| {
+                        // E-step: Calculate memberships (normalized probabilities)
+                        for i in 0..num_reads {
+                            let denom: f64 = mismatch_fp_in[i].iter().sum();
+                            if denom > 0.0 {
+                                for j in 0..num_haps {
+                                    memberships[i][j] = mismatch_fp_in[i][j] / denom;
+                                }
+                            } else {
+                                // clear row if denom is 0 to avoid using stale values
+                                memberships[i].iter_mut().for_each(|m| *m = 0.0);
+                            }
+                        }
+                        // M-step: Update frequencies based on memberships
+                        for j in 0..num_haps {
+                            theta_out[j] = 0.0;
+                            for i in 0..num_reads {
+                                theta_out[j] += memberships[i][j];
+                            }
+                            theta_out[j] /= num_reads as f64;
+                            // Update mismatch_fp with new frequencies
+                            for i in 0..num_reads {
+                                mismatch_fp_out[i][j] = mismatches[i][j] * theta_out[j];
+                            }
+                        }
+                    };
+                // Calculate likelihood closure - equivalent to EM_likelihood_sq in C
+                let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
+                    let mut likelihood = 0.0;
+                    for i in 0..num_reads {
+                        let row_sum: f64 = mismatch_fp[i].iter().sum();
+                        if row_sum > 0.0 {
+                            likelihood += row_sum.ln();
+                        }
+                    }
+                    likelihood
+                };
+                // Initial likelihood calculation
+                let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
+                let mut likelihood_new = likelihood_old;
+                let mut iters = 0;
+                // Main EM loop
+                while iters < self.em_iterations {
+                    // Update likelihood_old if new one is valid
+                    if !likelihood_new.is_infinite() && !likelihood_new.is_nan() {
+                        likelihood_old = likelihood_new;
+                    }
+                    // First EM update: theta_0 -> theta_1
+                    em_update(&mismatch_fp_new, &mut theta_1, &mut mismatch_fp_1);
+                    // Second EM update: theta_1 -> theta_2
+                    em_update(&mismatch_fp_1, &mut theta_2, &mut mismatch_fp_2);
+                    iters += 2;
+                    // Calculate step vectors and norms
+                    let mut rsq = 0.0;
+                    let mut vsq = 0.0;
+                    let mut v2sq = 0.0;
                     for j in 0..num_haps {
-                        mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
+                        r[j] = theta_1[j] - theta_new[j];
+                        rsq += r[j] * r[j];
+                        v[j] = (theta_2[j] - theta_1[j]) - r[j];
+                        vsq += v[j] * v[j];
+                        v2sq += (theta_2[j] - theta_1[j]) * (theta_2[j] - theta_1[j]);
                     }
-                }
-                // Stabilization step if alpha far from 1.0
-                if (alpha - 1.0).abs() > 0.01 {
-                    // Instead of cloning a large matrix, we use one of our pre-allocated
-                    // matrices as a buffer and then swap.
-                    em_update(&mismatch_fp_new, &mut theta_new, &mut mismatch_fp_1);
-                    std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_1);
-                    iters += 1;
-                }
-
-                // Calculate new likelihood
-                likelihood_new = calculate_likelihood(&mismatch_fp_new);
-
-                // If likelihood decreased, revert to theta_2
-                if likelihood_new.is_infinite()
-                    || likelihood_new.is_nan()
-                    || likelihood_new <= likelihood_old - lik_increase
-                {
-                    // Copy theta_2 to theta_new
-                    theta_new.copy_from_slice(&theta_2);
-                    std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_2);
-
-                    // Update likelihood
+                    // Early convergence check based on tolerance
+                    if rsq.sqrt() < tol {
+                        // theta_0 and theta_1 tolerance - use theta_1 results
+                        theta_new.copy_from_slice(&theta_1);
+                        break;
+                    } else if v2sq.sqrt() < tol {
+                        // theta_1 and theta_2 tolerance - use theta_2 results
+                        theta_new.copy_from_slice(&theta_2);
+                        break;
+                    }
+                    // SQUAREM acceleration step - carefully follow C implementation
+                    let mut alpha = f64::max(step_min, f64::min(step_max, (rsq / vsq).sqrt()));
+                    if alpha.is_nan() || alpha.is_infinite() {
+                        alpha = 1.0; // Fallback to regular EM step
+                    }
+                    // Compute accelerated parameter estimates - following C logic
+                    // Directly update frequencies first without updating mismatch_fp
+                    for j in 0..num_haps {
+                        theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
+                        // Parameter projection
+                        theta_new[j] = f64::max(0.01, theta_new[j]);
+                    }
+                    // Renormalize to the simplex after projection to keep a valid mixture
+                    let sum_theta: f64 = theta_new.iter().sum();
+                    if sum_theta > 0.0 {
+                        for val in theta_new.iter_mut() {
+                            *val /= sum_theta;
+                        }
+                    }
+                    // Recompute mismatch_fp_new using the normalized theta
+                    for i in 0..num_reads {
+                        for j in 0..num_haps {
+                            mismatch_fp_new[i][j] = mismatches[i][j] * theta_new[j];
+                        }
+                    }
+                    // Stabilization step if alpha far from 1.0
+                    if (alpha - 1.0).abs() > 0.01 {
+                        // Instead of cloning a large matrix, we use one of our pre-allocated
+                        // matrices as a buffer and then swap.
+                        em_update(&mismatch_fp_new, &mut theta_new, &mut mismatch_fp_1);
+                        std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_1);
+                        iters += 1;
+                    }
                     likelihood_new = calculate_likelihood(&mismatch_fp_new);
+                    // If likelihood decreased, revert to theta_2
+                    if likelihood_new.is_infinite()
+                        || likelihood_new.is_nan()
+                        || likelihood_new <= likelihood_old - lik_increase
+                    {
+                        // Copy theta_2 to theta_new
+                        theta_new.copy_from_slice(&theta_2);
+                        std::mem::swap(&mut mismatch_fp_new, &mut mismatch_fp_2);
 
-                    // Adjust step_max if at boundary
-                    if alpha == step_max {
-                        step_max = f64::max(step_max_d, step_max / mstep);
+                        // Update likelihood
+                        likelihood_new = calculate_likelihood(&mismatch_fp_new);
+
+                        // Adjust step_max if at boundary
+                        if alpha == step_max {
+                            step_max = f64::max(step_max_d, step_max / mstep);
+                        }
+                        alpha = 1.0;
                     }
-                    alpha = 1.0;
+                    // Increase step_max if we're hitting its boundary
+                    if alpha == step_max {
+                        step_max = mstep * step_max;
+                    }
+                    if step_min < 0.0 && alpha == step_min {
+                        step_min = mstep * step_min;
+                    }
+                    // Check for convergence
+                    if (likelihood_new - likelihood_old).abs() <= self.em_convergence_delta {
+                        break;
+                    }
                 }
+                // Return computed frequencies for this sample
+                theta_new
+            })
+            .collect();
 
-                // Increase step_max if we're hitting its boundary
-                if alpha == step_max {
-                    step_max = mstep * step_max;
-                }
-                if step_min < 0.0 && alpha == step_min {
-                    step_min = mstep * step_min;
-                }
-
-                // Check for convergence
-                if (likelihood_new - likelihood_old).abs() <= self.em_convergence_delta {
-                    break;
-                }
-            }
-            for (j, haplotype) in haplotypes.iter_mut().enumerate() {
-                haplotype.frequencies[sample_idx] = theta_new[j];
+        // Write back all frequencies sequentially (no contention, safe)
+        for (sample_idx, freqs) in sample_frequencies.iter().enumerate() {
+            for (hap_idx, haplotype) in haplotypes.iter_mut().enumerate() {
+                haplotype.frequencies[sample_idx] = freqs[hap_idx];
             }
         }
         // Remove haplotypes with zero frequencies across all samples
@@ -880,138 +878,136 @@ impl HaplotypeEstimationProblem {
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
-        for (sample_idx, _sample) in self.samples.iter().enumerate() {
-            let sample_read_indices = &self.reads_by_sample[sample_idx];
-            let num_reads = sample_read_indices.len();
-            let num_haps = haplotypes.len();
-            let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
-                let mut likelihood = 0.0;
-                for i in 0..num_reads {
-                    let row_sum: f64 = mismatch_fp[i].iter().sum();
-                    if row_sum > 0.0 {
-                        likelihood += row_sum.ln();
-                    }
-                }
-                likelihood
-            };
-            if num_haps == 1 {
-                haplotypes[0].frequencies[sample_idx] = 1.0;
-                continue;
-            }
-            // Initialize frequencies uniformly if not already set
-            let mut theta: Vec<f64> = haplotypes
-                .iter()
-                .map(|hap| {
-                    let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                    f64::max(1e-10, f)
-                })
-                .collect();
-
-            // Normalize initial frequencies to sum to 1.0
-            let sum: f64 = theta.iter().sum();
-            if sum > 0.0 {
-                for val in theta.iter_mut() {
-                    *val /= sum;
-                }
-            }
-
-            // Pre-calculate mismatch probabilities
-            // Parallelize this expensive operation for better performance with large datasets
-            let mismatches: Vec<Vec<f64>> = sample_read_indices
-                .par_iter()
-                .map(|&read_idx| {
-                    let read = &self.reads[read_idx];
-                    haplotypes
-                        .iter()
-                        .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
-                        .collect()
-                })
-                .collect();
-
-            // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
-            let mut mismatch_fp_new: Vec<Vec<f64>> = mismatches
-                .iter()
-                .map(|row| row.iter().zip(&theta).map(|(&m, &t)| m * t).collect())
-                .collect();
-
-            // Calculate initial likelihood
-            let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
-            let mut iters = 0;
-
-            // Hoist memberships allocation to avoid re-allocation in every EM iteration
-            let mut memberships = vec![vec![0.0; num_haps]; num_reads];
-
-            // Main EM loop
-            while iters < self.em_iterations {
-                let theta_old = theta.clone();
-                // E-step: Calculate memberships (normalized probabilities)
-                for i in 0..num_reads {
-                    let denom: f64 = mismatch_fp_new[i].iter().sum();
-                    if denom > 0.0 {
-                        for j in 0..num_haps {
-                            memberships[i][j] = mismatch_fp_new[i][j] / denom;
+        let num_haps = haplotypes.len();
+        // Process all samples in parallel - each sample is completely independent
+        // Collect frequency results: Vec<Vec<f64>> where outer = samples, inner = haplotype freqs
+        let sample_frequencies: Vec<Vec<f64>> = self
+            .samples
+            .par_iter()
+            .enumerate()
+            .map(|(sample_idx, _sample)| {
+                let sample_read_indices = &self.reads_by_sample[sample_idx];
+                let num_reads = sample_read_indices.len();
+                let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
+                    let mut likelihood = 0.0;
+                    for i in 0..num_reads {
+                        let row_sum: f64 = mismatch_fp[i].iter().sum();
+                        if row_sum > 0.0 {
+                            likelihood += row_sum.ln();
                         }
-                    } else {
-                        // Clear row if denom is 0 to avoid using stale values
-                        memberships[i].iter_mut().for_each(|m| *m = 0.0);
                     }
+                    likelihood
+                };
+                if num_haps == 1 {
+                    return vec![1.0];
                 }
-                // M-step: Update frequencies based on memberships
-                for j in 0..num_haps {
-                    theta[j] = 0.0;
-                    for i in 0..num_reads {
-                        theta[j] += memberships[i][j];
-                    }
-                    theta[j] /= num_reads as f64;
-
-                    // Ensure minimum probability
-                    theta[j] = f64::max(1e-10, theta[j]);
-                    for i in 0..num_reads {
-                        mismatch_fp_new[i][j] = mismatches[i][j] * theta[j];
-                    }
-                }
-                // Normalize to sum to 1.0
+                // Initialize frequencies uniformly if not already set
+                let mut theta: Vec<f64> = haplotypes
+                    .iter()
+                    .map(|hap| {
+                        let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
+                        f64::max(1e-10, f)
+                    })
+                    .collect();
+                // Normalize initial frequencies to sum to 1.0
                 let sum: f64 = theta.iter().sum();
                 if sum > 0.0 {
                     for val in theta.iter_mut() {
                         *val /= sum;
                     }
                 }
-                // Calculate new likelihood
-                let likelihood_new = calculate_likelihood(&mismatch_fp_new);
-
-                // Check for convergence
-                let converged = if likelihood_old.abs() > 1e-10 {
-                    // Use relative convergence criterion
-                    ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
-                        < convergence_delta
-                } else {
-                    // Use absolute convergence criterion for small likelihoods
-                    (likelihood_new - likelihood_old).abs() < convergence_delta
-                };
-
-                if converged {
-                    break;
-                }
-
-                // Check for parameter convergence as backup
-                let param_change: f64 = theta
+                // Pre-calculate mismatch probabilities
+                // Parallelize this expensive operation for better performance with large datasets
+                let mismatches: Vec<Vec<f64>> = sample_read_indices
+                    .par_iter()
+                    .map(|&read_idx| {
+                        let read = &self.reads[read_idx];
+                        haplotypes
+                            .iter()
+                            .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
+                            .collect()
+                    })
+                    .collect();
+                // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
+                let mut mismatch_fp_new: Vec<Vec<f64>> = mismatches
                     .iter()
-                    .zip(&theta_old)
-                    .map(|(&new, &old)| (new - old).abs())
-                    .sum();
+                    .map(|row| row.iter().zip(&theta).map(|(&m, &t)| m * t).collect())
+                    .collect();
+                // Calculate initial likelihood
+                let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
+                let mut iters = 0;
+                // Hoist memberships allocation to avoid re-allocation in every EM iteration
+                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
+                // Main EM loop
+                while iters < self.em_iterations {
+                    let theta_old = theta.clone();
+                    // E-step: Calculate memberships (normalized probabilities)
+                    for i in 0..num_reads {
+                        let denom: f64 = mismatch_fp_new[i].iter().sum();
+                        if denom > 0.0 {
+                            for j in 0..num_haps {
+                                memberships[i][j] = mismatch_fp_new[i][j] / denom;
+                            }
+                        } else {
+                            // Clear row if denom is 0 to avoid using stale values
+                            memberships[i].iter_mut().for_each(|m| *m = 0.0);
+                        }
+                    }
+                    // M-step: Update frequencies based on memberships
+                    for j in 0..num_haps {
+                        theta[j] = 0.0;
+                        for i in 0..num_reads {
+                            theta[j] += memberships[i][j];
+                        }
+                        theta[j] /= num_reads as f64;
 
-                if param_change < convergence_delta {
-                    break;
+                        // Ensure minimum probability
+                        theta[j] = f64::max(1e-10, theta[j]);
+                        for i in 0..num_reads {
+                            mismatch_fp_new[i][j] = mismatches[i][j] * theta[j];
+                        }
+                    }
+                    // Normalize to sum to 1.0
+                    let sum: f64 = theta.iter().sum();
+                    if sum > 0.0 {
+                        for val in theta.iter_mut() {
+                            *val /= sum;
+                        }
+                    }
+                    // Calculate new likelihood
+                    let likelihood_new = calculate_likelihood(&mismatch_fp_new);
+                    // Check for convergence
+                    let converged = if likelihood_old.abs() > 1e-10 {
+                        // Use relative convergence criterion
+                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
+                            < convergence_delta
+                    } else {
+                        // Use absolute convergence criterion for small likelihoods
+                        (likelihood_new - likelihood_old).abs() < convergence_delta
+                    };
+                    if converged {
+                        break;
+                    }
+                    // Check for parameter convergence as backup
+                    let param_change: f64 = theta
+                        .iter()
+                        .zip(&theta_old)
+                        .map(|(&new, &old)| (new - old).abs())
+                        .sum();
+                    if param_change < convergence_delta {
+                        break;
+                    }
+                    likelihood_old = likelihood_new;
+                    iters += 1;
                 }
-
-                likelihood_old = likelihood_new;
-                iters += 1;
-            }
-
-            // Store final frequencies
-            for (j, haplotype) in haplotypes.iter_mut().enumerate() {
-                haplotype.frequencies[sample_idx] = theta[j];
+                // Return computed frequencies for this sample
+                theta
+            })
+            .collect();
+        // Write back all frequencies sequentially (no contention, safe)
+        for (sample_idx, freqs) in sample_frequencies.iter().enumerate() {
+            for (hap_idx, haplotype) in haplotypes.iter_mut().enumerate() {
+                haplotype.frequencies[sample_idx] = freqs[hap_idx];
             }
         }
         // Remove haplotypes with zero frequencies across all samples

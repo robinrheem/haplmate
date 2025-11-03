@@ -1,18 +1,20 @@
-use ahash::{AHasher, HashMap as AHashMap};
+use ahash::AHasher;
 use anyhow::Result;
 use argmin::core::{
     observers::{Observe, ObserverMode},
     CostFunction, Error, Executor, State, KV,
 };
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
+use dashmap::DashMap;
 use rand::prelude::*;
 use rand::{thread_rng, Rng};
+use rayon::prelude::*;
 use seq_io::fasta::{Reader, Record};
 use statrs::distribution::{Binomial, Discrete};
-use std::cell::RefCell;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::process::exit;
+use std::sync::Arc;
 use tracing::{debug, info, trace};
 use tracing_subscriber;
 
@@ -483,7 +485,8 @@ struct HaplotypeEstimationProblem {
     original_read_length: usize,
     seed: Option<u64>,
     // Key: (read_idx, haplotype_hash) to make cache immune to haplotype reordering
-    mismatch_prob_cache: RefCell<AHashMap<(usize, u64), f64>>,
+    // Lock-free concurrent cache using DashMap for optimal parallel performance
+    mismatch_prob_cache: Arc<DashMap<(usize, u64), f64>>,
     // Pre-indexed reads by sample: reads_by_sample[sample_idx] = vec of read indices
     reads_by_sample: Vec<Vec<usize>>,
 }
@@ -525,6 +528,8 @@ impl HaplotypeEstimationProblem {
 
     /// Calculate mismatches between a read and haplotype using the global cache
     /// Uses content-based cache key that's immune to haplotype reordering
+    /// Optimized with early stopping when mismatches exceed threshold
+    /// Lock-free concurrent cache access via DashMap for optimal parallel performance
     fn cached_mismatch_probability(
         &self,
         read_idx: usize,
@@ -533,19 +538,26 @@ impl HaplotypeEstimationProblem {
     ) -> f64 {
         let haplotype_hash = self.haplotype_hash(haplotype);
         let cache_key = (read_idx, haplotype_hash);
-        if let Some(prob) = self.mismatch_prob_cache.borrow().get(&cache_key) {
+
+        // Check cache first - no locking needed with DashMap!
+        if let Some(prob) = self.mismatch_prob_cache.get(&cache_key) {
             return *prob;
         }
-        let mismatches = read
-            .sequence
-            .iter()
-            .zip(&haplotype.sequence)
-            .filter(|(&r, &h)| r != h && r != b'-')
-            .count();
+
+        // Early stopping optimization: stop counting when we exceed max_mismatches
+        let mut mismatches = 0;
+        for (&r, &h) in read.sequence.iter().zip(&haplotype.sequence) {
+            if r != h && r != b'-' {
+                mismatches += 1;
+                // Early exit if we've already exceeded the threshold
+                if mismatches > self.em_max_mismatches {
+                    self.mismatch_prob_cache.insert(cache_key, 0.0);
+                    return 0.0;
+                }
+            }
+        }
         let prob = self.mismatch_probability(mismatches);
-        self.mismatch_prob_cache
-            .borrow_mut()
-            .insert(cache_key, prob);
+        self.mismatch_prob_cache.insert(cache_key, prob);
         prob
     }
 
@@ -622,8 +634,9 @@ impl HaplotypeEstimationProblem {
             }
 
             // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
+            // Parallelize this expensive operation for better performance with large datasets
             let mismatches: Vec<Vec<f64>> = sample_read_indices
-                .iter()
+                .par_iter()
                 .map(|&read_idx| {
                     let read = &self.reads[read_idx];
                     haplotypes
@@ -903,8 +916,9 @@ impl HaplotypeEstimationProblem {
             }
 
             // Pre-calculate mismatch probabilities
+            // Parallelize this expensive operation for better performance with large datasets
             let mismatches: Vec<Vec<f64>> = sample_read_indices
-                .iter()
+                .par_iter()
                 .map(|&read_idx| {
                     let read = &self.reads[read_idx];
                     haplotypes
@@ -924,11 +938,12 @@ impl HaplotypeEstimationProblem {
             let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
             let mut iters = 0;
 
+            // Hoist memberships allocation to avoid re-allocation in every EM iteration
+            let mut memberships = vec![vec![0.0; num_haps]; num_reads];
+
             // Main EM loop
             while iters < self.em_iterations {
                 let theta_old = theta.clone();
-                // Temporary holding for membership probabilities
-                let mut memberships = vec![vec![0.0; num_haps]; num_reads];
                 // E-step: Calculate memberships (normalized probabilities)
                 for i in 0..num_reads {
                     let denom: f64 = mismatch_fp_new[i].iter().sum();
@@ -936,6 +951,9 @@ impl HaplotypeEstimationProblem {
                         for j in 0..num_haps {
                             memberships[i][j] = mismatch_fp_new[i][j] / denom;
                         }
+                    } else {
+                        // Clear row if denom is 0 to avoid using stale values
+                        memberships[i].iter_mut().for_each(|m| *m = 0.0);
                     }
                 }
                 // M-step: Update frequencies based on memberships
@@ -1486,7 +1504,7 @@ fn propose_haplotypes(
         sa_max_temperature: optimization_parameters.sa_max_temperature,
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
-        mismatch_prob_cache: RefCell::new(AHashMap::default()),
+        mismatch_prob_cache: Arc::new(DashMap::new()),
         reads_by_sample,
     };
     info!(
@@ -1724,7 +1742,7 @@ mod tests {
             sa_max_temperature: 10.0,
             original_read_length: 100,
             seed: Some(12345),
-            mismatch_prob_cache: RefCell::new(AHashMap::default()),
+            mismatch_prob_cache: Arc::new(DashMap::new()),
             reads_by_sample: vec![],
         }
     }

@@ -1,4 +1,4 @@
-use ahash::AHasher;
+use ahash::{AHasher, HashMap as AHashMap};
 use anyhow::Result;
 use argmin::core::{
     observers::{Observe, ObserverMode},
@@ -10,7 +10,7 @@ use rand::{thread_rng, Rng};
 use seq_io::fasta::{Reader, Record};
 use statrs::distribution::{Binomial, Discrete};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::process::exit;
 use tracing::{debug, info, trace};
@@ -483,7 +483,9 @@ struct HaplotypeEstimationProblem {
     original_read_length: usize,
     seed: Option<u64>,
     // Key: (read_idx, haplotype_hash) to make cache immune to haplotype reordering
-    mismatch_prob_cache: RefCell<HashMap<(usize, u64), f64>>,
+    mismatch_prob_cache: RefCell<AHashMap<(usize, u64), f64>>,
+    // Pre-indexed reads by sample: reads_by_sample[sample_idx] = vec of read indices
+    reads_by_sample: Vec<Vec<usize>>,
 }
 
 impl HaplotypeEstimationProblem {
@@ -596,14 +598,9 @@ impl HaplotypeEstimationProblem {
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
         // TODO: Parallel processing
-        for (sample_idx, sample) in self.samples.iter().enumerate() {
-            let sample_reads: Vec<(usize, &Read)> = self
-                .reads
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.sample == *sample)
-                .collect();
-            let num_reads = sample_reads.len();
+        for (sample_idx, _sample) in self.samples.iter().enumerate() {
+            let sample_read_indices = &self.reads_by_sample[sample_idx];
+            let num_reads = sample_read_indices.len();
             let num_haps = haplotypes.len();
             if num_haps == 1 {
                 haplotypes[0].frequencies[sample_idx] = 1.0;
@@ -625,9 +622,10 @@ impl HaplotypeEstimationProblem {
             }
 
             // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
-            let mismatches: Vec<Vec<f64>> = sample_reads
+            let mismatches: Vec<Vec<f64>> = sample_read_indices
                 .iter()
-                .map(|&(read_idx, read)| {
+                .map(|&read_idx| {
+                    let read = &self.reads[read_idx];
                     haplotypes
                         .iter()
                         .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
@@ -869,14 +867,9 @@ impl HaplotypeEstimationProblem {
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
-        for (sample_idx, sample) in self.samples.iter().enumerate() {
-            let sample_reads: Vec<(usize, &Read)> = self
-                .reads
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.sample == *sample)
-                .collect();
-            let num_reads = sample_reads.len();
+        for (sample_idx, _sample) in self.samples.iter().enumerate() {
+            let sample_read_indices = &self.reads_by_sample[sample_idx];
+            let num_reads = sample_read_indices.len();
             let num_haps = haplotypes.len();
             let calculate_likelihood = |mismatch_fp: &Vec<Vec<f64>>| -> f64 {
                 let mut likelihood = 0.0;
@@ -910,9 +903,10 @@ impl HaplotypeEstimationProblem {
             }
 
             // Pre-calculate mismatch probabilities
-            let mismatches: Vec<Vec<f64>> = sample_reads
+            let mismatches: Vec<Vec<f64>> = sample_read_indices
                 .iter()
-                .map(|&(read_idx, read)| {
+                .map(|&read_idx| {
+                    let read = &self.reads[read_idx];
                     haplotypes
                         .iter()
                         .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
@@ -1348,14 +1342,11 @@ impl CostFunction for HaplotypeEstimationProblem {
     /// - Higher costs indicate worse solutions
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
         let mut total_cost = 0.0;
-        for (sample_idx, sample) in self.samples.iter().enumerate() {
-            let sample_reads: Vec<(usize, &Read)> = self
-                .reads
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| &r.sample == sample)
-                .collect();
-            for &(read_idx, read) in &sample_reads {
+        for (sample_idx, _sample) in self.samples.iter().enumerate() {
+            // Use pre-indexed reads instead of filtering
+            let sample_read_indices = &self.reads_by_sample[sample_idx];
+            for &read_idx in sample_read_indices {
+                let read = &self.reads[read_idx];
                 let mut total_mismatch_probability = 0.0;
                 for haplotype in haplotypes.iter() {
                     // Use cached probability or calculate and cache it
@@ -1477,6 +1468,12 @@ fn propose_haplotypes(
     optimization_parameters: OptimizationParameters,
 ) -> Vec<Haplotype> {
     let samples = optimization_parameters.samples.clone();
+    let mut reads_by_sample: Vec<Vec<usize>> = vec![Vec::new(); samples.len()];
+    for (read_idx, read) in reads.iter().enumerate() {
+        if let Some(sample_idx) = samples.iter().position(|s| s == &read.sample) {
+            reads_by_sample[sample_idx].push(read_idx);
+        }
+    }
     let problem = HaplotypeEstimationProblem {
         samples,
         reads: reads.to_vec(),
@@ -1489,7 +1486,8 @@ fn propose_haplotypes(
         sa_max_temperature: optimization_parameters.sa_max_temperature,
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
-        mismatch_prob_cache: RefCell::new(HashMap::new()),
+        mismatch_prob_cache: RefCell::new(AHashMap::default()),
+        reads_by_sample,
     };
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
@@ -1726,7 +1724,8 @@ mod tests {
             sa_max_temperature: 10.0,
             original_read_length: 100,
             seed: Some(12345),
-            mismatch_prob_cache: RefCell::new(HashMap::new()),
+            mismatch_prob_cache: RefCell::new(AHashMap::default()),
+            reads_by_sample: vec![],
         }
     }
 

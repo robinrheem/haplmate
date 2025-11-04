@@ -1326,28 +1326,36 @@ impl CostFunction for HaplotypeEstimationProblem {
     /// - Only considers haplotypes from matching sample when calculating read probabilities
     /// - Higher costs indicate worse solutions
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
-        let mut total_cost = 0.0;
-        for (sample_idx, _sample) in self.samples.iter().enumerate() {
-            // Use pre-indexed reads instead of filtering
-            let sample_read_indices = &self.reads_by_sample[sample_idx];
-            for &read_idx in sample_read_indices {
-                let read = &self.reads[read_idx];
-                let mut total_mismatch_probability = 0.0;
-                for haplotype in haplotypes.iter() {
-                    // Use cached probability or calculate and cache it
-                    let probability = self.cached_mismatch_probability(read_idx, read, haplotype);
-                    let frequency = *haplotype.frequencies.get(sample_idx).unwrap_or(&0.0);
-                    total_mismatch_probability += probability * frequency;
+        // Parallelize across samples since each sample's cost is independent
+        // DashMap cache is thread-safe so concurrent access is fine
+        let total_cost: f64 = self
+            .samples
+            .par_iter()
+            .enumerate()
+            .map(|(sample_idx, _sample)| {
+                let sample_read_indices = &self.reads_by_sample[sample_idx];
+                let mut sample_cost = 0.0;
+                for &read_idx in sample_read_indices {
+                    let read = &self.reads[read_idx];
+                    let mut total_mismatch_probability = 0.0;
+                    for haplotype in haplotypes.iter() {
+                        // Use cached probability or calculate and cache it
+                        let probability =
+                            self.cached_mismatch_probability(read_idx, read, haplotype);
+                        let frequency = *haplotype.frequencies.get(sample_idx).unwrap_or(&0.0);
+                        total_mismatch_probability += probability * frequency;
+                    }
+                    if total_mismatch_probability > 0.0 {
+                        sample_cost -= total_mismatch_probability.ln();
+                    }
                 }
-                if total_mismatch_probability > 0.0 {
-                    total_cost -= total_mismatch_probability.ln();
-                }
-            }
-        }
+                sample_cost
+            })
+            .sum();
         // Penalty from four gamete test
-        total_cost += self.lambda1 * self.min_recombinations(haplotypes) as f64;
+        let total_cost = total_cost + self.lambda1 * self.min_recombinations(haplotypes) as f64;
         // Penalty for number of haplotypes
-        total_cost += self.lambda2 * haplotypes.len() as f64;
+        let total_cost = total_cost + self.lambda2 * haplotypes.len() as f64;
         info!("Total cost: {}", total_cost);
         Ok(total_cost)
     }
@@ -1414,7 +1422,7 @@ impl Anneal for HaplotypeEstimationProblem {
                 continue;
             }
             debug!("Running EM optimization on {} haplotypes", haplotypes.len());
-            self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+            self.expectation_maximization(&mut haplotypes, convergence_delta)?;
             if !haplotypes.is_empty() {
                 debug!(
                     "Annealing step complete, returning {} haplotypes",
@@ -1510,8 +1518,7 @@ fn propose_haplotypes(
     let sa_progress = optimization_parameters.sa_max_temperature;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
-    {
+    if let Err(e) = problem.expectation_maximization(&mut best_haplotypes, convergence_delta) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e

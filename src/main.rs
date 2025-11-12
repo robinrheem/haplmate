@@ -1506,7 +1506,7 @@ fn propose_haplotypes(
     let solver = SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, rng)
         .unwrap()
         .with_temp_func(SATempFunc::TemperatureFast)
-        .with_stall_best(optimization_parameters.sa_iterations as u64);
+        .with_reannealing_fixed(optimization_parameters.sa_iterations as u64);
     // Optimize initial haplotypes with EM before starting SA
     let mut best_haplotypes = initial_haplotypes.clone();
     info!(

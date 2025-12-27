@@ -627,9 +627,9 @@ impl HaplotypeEstimationProblem {
                     }
                 }
                 // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
-                // Sequential processing over reads to avoid nested parallelism overhead
+                // Parallelize this expensive operation for better performance with large datasets
                 let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .iter()
+                    .par_iter()
                     .map(|&read_idx| {
                         let read = &self.reads[read_idx];
                         haplotypes
@@ -906,8 +906,9 @@ impl HaplotypeEstimationProblem {
                     }
                 }
                 // Pre-calculate mismatch probabilities
+                // Parallelize this expensive operation for better performance with large datasets
                 let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .iter()
+                    .par_iter()
                     .map(|&read_idx| {
                         let read = &self.reads[read_idx];
                         haplotypes

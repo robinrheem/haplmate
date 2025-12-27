@@ -1,18 +1,14 @@
 use ahash::AHashSet;
-use ahash::AHasher;
 use anyhow::Result;
 use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
-use moka::sync::Cache;
 use rand::prelude::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use seq_io::fasta::{Reader, Record};
 use statrs::distribution::{Binomial, Discrete};
 use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
 use std::process::exit;
-use std::sync::Arc;
 use tracing::{debug, info, trace};
 use tracing_subscriber;
 
@@ -466,73 +462,71 @@ fn restore_invariants(sequence: &[u8], invariant_positions: &[(usize, u8)]) -> V
 struct HaplotypeEstimationProblem {
     samples: Vec<String>,
     reads: Vec<Read>,
-    error_rate: f64,
     lambda1: f64,
     lambda2: f64,
     em_max_mismatches: usize,
     em_iterations: usize,
     em_convergence_delta: f64,
     sa_max_temperature: f64,
-    original_read_length: usize,
     seed: Option<u64>,
-    // Key: (read_idx, haplotype_hash) to make cache immune to haplotype reordering
-    // Concurrent cache with size limits using Moka for optimal parallel performance
-    mismatch_prob_cache: Cache<(usize, u64), f64>,
     // Pre-indexed reads by sample: reads_by_sample[sample_idx] = vec of read indices
     reads_by_sample: Vec<Vec<usize>>,
+    // Pre-computed binomial PMF lookup table: mismatch_prob_table[num_mismatches] = probability
+    mismatch_prob_table: Vec<f64>,
 }
 
 impl HaplotypeEstimationProblem {
-    /// Calculates the probability of observing a given number of mismatches in a sequence
-    /// using a binomial distribution model.
-    ///
-    /// # Arguments
-    ///
-    /// * `mismatches` - Number of mismatches observed between a read and haplotype
-    /// * `sequence_length` - Length of the sequence being compared
-    ///
-    /// # Returns
-    ///
-    /// The probability of observing exactly `mismatches` number of mismatches in a sequence
-    /// of length `sequence_length`, given the error rate. Returns 0.0 if mismatches exceed
-    /// the maximum allowed mismatches or if creating the binomial distribution fails.
+    fn new(
+        samples: Vec<String>,
+        reads: Vec<Read>,
+        error_rate: f64,
+        lambda1: f64,
+        lambda2: f64,
+        em_max_mismatches: usize,
+        em_iterations: usize,
+        em_convergence_delta: f64,
+        sa_max_temperature: f64,
+        original_read_length: usize,
+        seed: Option<u64>,
+        reads_by_sample: Vec<Vec<usize>>,
+    ) -> Self {
+        // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
+        let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
+            Ok(binomial) => (0..=em_max_mismatches)
+                .map(|m| binomial.pmf(m as u64))
+                .collect(),
+            Err(_) => {
+                eprintln!("Failed to create binomial distribution");
+                vec![0.0; em_max_mismatches + 1]
+            }
+        };
+        Self {
+            samples,
+            reads,
+            lambda1,
+            lambda2,
+            em_max_mismatches,
+            em_iterations,
+            em_convergence_delta,
+            sa_max_temperature,
+            seed,
+            reads_by_sample,
+            mismatch_prob_table,
+        }
+    }
+
+    /// Looks up the pre-computed probability for a given mismatch count.
+    #[inline]
     fn mismatch_probability(&self, mismatches: usize) -> f64 {
         if mismatches > self.em_max_mismatches {
             return 0.0;
         }
-        match Binomial::new(self.error_rate, self.original_read_length as u64) {
-            Ok(binomial) => binomial.pmf(mismatches as u64),
-            Err(_) => {
-                eprintln!("Failed to create binomial distribution");
-                return 0.0;
-            }
-        }
+        self.mismatch_prob_table[mismatches]
     }
 
-    /// Compute a hash of a haplotype sequence for cache key
-    /// Uses AHasher for 40%+ performance improvement over DefaultHasher
-    fn haplotype_hash(&self, haplotype: &Haplotype) -> u64 {
-        let mut hasher = AHasher::default();
-        haplotype.sequence.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    /// Calculate mismatches between a read and haplotype using the global cache
-    /// Uses content-based cache key that's immune to haplotype reordering
-    /// Optimized with early stopping when mismatches exceed threshold
-    /// Concurrent cache access with size limits via Moka for optimal parallel performance
-    fn cached_mismatch_probability(
-        &self,
-        read_idx: usize,
-        read: &Read,
-        haplotype: &Haplotype,
-    ) -> f64 {
-        let haplotype_hash = self.haplotype_hash(haplotype);
-        let cache_key = (read_idx, haplotype_hash);
-        // Check cache first
-        if let Some(prob) = self.mismatch_prob_cache.get(&cache_key) {
-            return prob;
-        }
+    /// Calculate mismatch probability between a read and haplotype.
+    /// Optimized with early stopping when mismatches exceed threshold.
+    fn compute_mismatch_probability(&self, read: &Read, haplotype: &Haplotype) -> f64 {
         // Early stopping optimization: stop counting when we exceed max_mismatches
         let mut mismatches = 0;
         for (&r, &h) in read.sequence.iter().zip(&haplotype.sequence) {
@@ -540,14 +534,26 @@ impl HaplotypeEstimationProblem {
                 mismatches += 1;
                 // Early exit if we've already exceeded the threshold
                 if mismatches > self.em_max_mismatches {
-                    self.mismatch_prob_cache.insert(cache_key, 0.0);
                     return 0.0;
                 }
             }
         }
-        let prob = self.mismatch_probability(mismatches);
-        self.mismatch_prob_cache.insert(cache_key, prob);
-        prob
+        self.mismatch_probability(mismatches)
+    }
+
+    /// Pre-compute mismatch probability matrix for all reads against all haplotypes.
+    /// Returns a Vec where mismatch_matrix[read_idx][hap_idx] = probability.
+    /// This avoids synchronization overhead from caching in tight parallel loops.
+    fn compute_mismatch_matrix(&self, haplotypes: &[Haplotype]) -> Vec<Vec<f64>> {
+        self.reads
+            .par_iter()
+            .map(|read| {
+                haplotypes
+                    .iter()
+                    .map(|hap| self.compute_mismatch_probability(read, hap))
+                    .collect()
+            })
+            .collect()
     }
 
     /// Performs the Square Expectation-Maximization algorithm to estimate haplotype frequencies.
@@ -634,7 +640,7 @@ impl HaplotypeEstimationProblem {
                         let read = &self.reads[read_idx];
                         haplotypes
                             .iter()
-                            .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
+                            .map(|hap| self.compute_mismatch_probability(read, hap))
                             .collect()
                     })
                     .collect();
@@ -643,7 +649,6 @@ impl HaplotypeEstimationProblem {
                     .iter()
                     .map(|row| row.iter().zip(&theta_new).map(|(&m, &t)| m * t).collect())
                     .collect();
-
                 // SQUAREM algorithm parameters, matching C code
                 let mut step_min = 1.0;
                 let mut step_max = 1.0;
@@ -913,7 +918,7 @@ impl HaplotypeEstimationProblem {
                         let read = &self.reads[read_idx];
                         haplotypes
                             .iter()
-                            .map(|hap| self.cached_mismatch_probability(read_idx, read, hap))
+                            .map(|hap| self.compute_mismatch_probability(read, hap))
                             .collect()
                     })
                     .collect();
@@ -1344,8 +1349,7 @@ impl CostFunction for HaplotypeEstimationProblem {
     /// - Only considers haplotypes from matching sample when calculating read probabilities
     /// - Higher costs indicate worse solutions
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {
-        // Parallelize across samples since each sample's cost is independent
-        // DashMap cache is thread-safe so concurrent access is fine
+        let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
         let total_cost: f64 = self
             .samples
             .par_iter()
@@ -1354,12 +1358,9 @@ impl CostFunction for HaplotypeEstimationProblem {
                 let sample_read_indices = &self.reads_by_sample[sample_idx];
                 let mut sample_cost = 0.0;
                 for &read_idx in sample_read_indices {
-                    let read = &self.reads[read_idx];
                     let mut total_mismatch_probability = 0.0;
-                    for haplotype in haplotypes.iter() {
-                        // Use cached probability or calculate and cache it
-                        let probability =
-                            self.cached_mismatch_probability(read_idx, read, haplotype);
+                    for (hap_idx, haplotype) in haplotypes.iter().enumerate() {
+                        let probability = mismatch_matrix[read_idx][hap_idx];
                         let frequency = *haplotype.frequencies.get(sample_idx).unwrap_or(&0.0);
                         total_mismatch_probability += probability * frequency;
                     }
@@ -1485,21 +1486,20 @@ fn propose_haplotypes(
             reads_by_sample[sample_idx].push(read_idx);
         }
     }
-    let problem = HaplotypeEstimationProblem {
+    let problem = HaplotypeEstimationProblem::new(
         samples,
-        reads: reads.to_vec(),
-        error_rate: optimization_parameters.error_rate,
-        lambda1: optimization_parameters.lambda1,
-        lambda2: optimization_parameters.lambda2,
-        em_max_mismatches: optimization_parameters.max_mismatches,
-        em_iterations: optimization_parameters.em_iterations,
-        em_convergence_delta: optimization_parameters.em_cdelta,
-        sa_max_temperature: optimization_parameters.sa_max_temperature,
-        original_read_length: optimization_parameters.original_read_length,
-        seed: optimization_parameters.seed,
-        mismatch_prob_cache: Cache::new(10_000_000),
+        reads.to_vec(),
+        optimization_parameters.error_rate,
+        optimization_parameters.lambda1,
+        optimization_parameters.lambda2,
+        optimization_parameters.max_mismatches,
+        optimization_parameters.em_iterations,
+        optimization_parameters.em_cdelta,
+        optimization_parameters.sa_max_temperature,
+        optimization_parameters.original_read_length,
+        optimization_parameters.seed,
         reads_by_sample,
-    };
+    );
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
         problem.samples.len(),
@@ -1540,7 +1540,7 @@ fn propose_haplotypes(
     let sa_progress = optimization_parameters.sa_max_temperature;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
-    if let Err(e) = problem.expectation_maximization(&mut best_haplotypes, convergence_delta) {
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -1726,21 +1726,20 @@ mod tests {
     }
 
     fn create_test_problem() -> HaplotypeEstimationProblem {
-        HaplotypeEstimationProblem {
-            samples: vec![],
-            reads: vec![],
-            error_rate: 0.01,
-            lambda1: 1.0,
-            lambda2: 1.0,
-            em_max_mismatches: 3,
-            em_iterations: 100,
-            em_convergence_delta: 0.001,
-            sa_max_temperature: 10.0,
-            original_read_length: 100,
-            seed: Some(12345),
-            mismatch_prob_cache: Cache::new(10_000_000),
-            reads_by_sample: vec![],
-        }
+        HaplotypeEstimationProblem::new(
+            vec![],           // samples
+            vec![],           // reads
+            0.01,             // error_rate
+            1.0,              // lambda1
+            1.0,              // lambda2
+            3,                // em_max_mismatches
+            100,              // em_iterations
+            0.001,            // em_convergence_delta
+            10.0,             // sa_max_temperature
+            100,              // original_read_length
+            Some(12345),      // seed
+            vec![],           // reads_by_sample
+        )
     }
 
     #[test]

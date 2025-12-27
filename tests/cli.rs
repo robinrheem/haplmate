@@ -45,6 +45,7 @@ fn test_proposed_haplotypes() -> Result<(), Box<dyn std::error::Error>> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
         .arg("--seed=12345")
@@ -117,6 +118,7 @@ fn test_basic_haplotype_estimation() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
         .arg("--seed=12345")
@@ -213,6 +215,7 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.5")
         .arg("--seed=12345")
@@ -230,6 +233,7 @@ fn test_error_rate_handling() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--em-cdelta=0.5")
         .arg("--error-rate=0.04")
         .arg("--seed=12345")
@@ -293,6 +297,7 @@ fn test_multiple_samples() -> Result<()> {
         .arg(sample3_path)
         .arg("--sa-reruns=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.1")
         .arg("--lambda2=0.1")
         .arg("--seed=12345");
@@ -379,6 +384,7 @@ fn test_shared_haplotypes() -> Result<()> {
         .arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
         .arg("--seed=12345")
@@ -495,6 +501,7 @@ fn test_complex_shared_patterns() -> Result<()> {
     cmd.arg("--sa-reruns=1")
         .arg("--sa-iterations=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
         .arg("--seed=12345")
@@ -549,6 +556,7 @@ fn test_single_sample_with_gaps() -> Result<()> {
     let mut cmd = Command::cargo_bin("haplmate")?;
     cmd.arg(sample_path)
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--seed=12345");
 
     let output = cmd.output()?;
@@ -642,6 +650,7 @@ fn test_multiple_samples_with_gaps() -> Result<()> {
     }
     cmd.arg("--sa-reruns=1")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.001")
         .arg("--lambda2=0.001")
         .arg("--seed=12345");
@@ -733,6 +742,7 @@ fn test_sample_haplotypes() -> Result<()> {
     let mut cmd = Command::cargo_bin("haplmate")?;
     cmd.arg("tests/data/sample_haplotypes.fa")
         .arg("--sa-max-temperature=10.0")
+        .arg("--sa-stall-best=2000")
         .arg("--lambda1=0.0")
         .arg("--lambda2=0.0")
         .arg("--seed=12345");

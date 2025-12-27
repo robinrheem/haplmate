@@ -25,7 +25,7 @@ jobs:
             ext: tar.gz
 
           # macOS Intel
-          - os: macos-13
+          - os: macos-15
             target: x86_64-apple-darwin
             ext: tar.gz
 

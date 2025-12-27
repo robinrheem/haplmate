@@ -10,6 +10,7 @@ argmin = "0.10.0"
 argmin-math = { version = "0.4.0", features = ["ndarray_latest", "nalgebra_latest"] }
 clap = { version = "4.5.21", features = ["derive"] }
 dashmap = "6.1.0"
+moka = { version = "0.12", features = ["sync"] }
 natord = "1.0.9"
 rand = "0.8.5"
 rayon = "1.10.0"

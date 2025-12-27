@@ -3,7 +3,7 @@ use ahash::AHasher;
 use anyhow::Result;
 use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
-use dashmap::DashMap;
+use moka::sync::Cache;
 use rand::prelude::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
@@ -58,6 +58,21 @@ struct Args {
     /// Random seed for deterministic output(testing purposes only)
     #[arg(long)]
     seed: Option<u64>,
+    /// SA reannealing after n accepted steps
+    #[arg(long, default_value_t = u64::MAX)]
+    sa_reannealing_accepted: u64,
+    /// SA reannealing after n best cost improvements
+    #[arg(long, default_value_t = u64::MAX)]
+    sa_reannealing_best: u64,
+    /// SA reannealing after n fixed iterations
+    #[arg(long, default_value_t = u64::MAX)]
+    sa_reannealing_fixed: u64,
+    /// SA stall detection after n accepted steps without improvement
+    #[arg(long, default_value_t = u64::MAX)]
+    sa_stall_accepted: u64,
+    /// SA stall detection after n iterations without best cost improvement
+    #[arg(long, default_value_t = u64::MAX)]
+    sa_stall_best: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +101,11 @@ struct OptimizationParameters {
     em_cdelta: f64,
     original_read_length: usize,
     seed: Option<u64>,
+    sa_reannealing_accepted: u64,
+    sa_reannealing_best: u64,
+    sa_reannealing_fixed: u64,
+    sa_stall_accepted: u64,
+    sa_stall_best: u64,
 }
 
 /// Check whether all reads in samples are aligned
@@ -456,8 +476,8 @@ struct HaplotypeEstimationProblem {
     original_read_length: usize,
     seed: Option<u64>,
     // Key: (read_idx, haplotype_hash) to make cache immune to haplotype reordering
-    // Lock-free concurrent cache using DashMap for optimal parallel performance
-    mismatch_prob_cache: Arc<DashMap<(usize, u64), f64>>,
+    // Concurrent cache with size limits using Moka for optimal parallel performance
+    mismatch_prob_cache: Cache<(usize, u64), f64>,
     // Pre-indexed reads by sample: reads_by_sample[sample_idx] = vec of read indices
     reads_by_sample: Vec<Vec<usize>>,
 }
@@ -500,7 +520,7 @@ impl HaplotypeEstimationProblem {
     /// Calculate mismatches between a read and haplotype using the global cache
     /// Uses content-based cache key that's immune to haplotype reordering
     /// Optimized with early stopping when mismatches exceed threshold
-    /// Lock-free concurrent cache access via DashMap for optimal parallel performance
+    /// Concurrent cache access with size limits via Moka for optimal parallel performance
     fn cached_mismatch_probability(
         &self,
         read_idx: usize,
@@ -509,12 +529,10 @@ impl HaplotypeEstimationProblem {
     ) -> f64 {
         let haplotype_hash = self.haplotype_hash(haplotype);
         let cache_key = (read_idx, haplotype_hash);
-
-        // Check cache first - no locking needed with DashMap!
+        // Check cache first
         if let Some(prob) = self.mismatch_prob_cache.get(&cache_key) {
-            return *prob;
+            return prob;
         }
-
         // Early stopping optimization: stop counting when we exceed max_mismatches
         let mut mismatches = 0;
         for (&r, &h) in read.sequence.iter().zip(&haplotype.sequence) {
@@ -609,9 +627,9 @@ impl HaplotypeEstimationProblem {
                     }
                 }
                 // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
-                // Parallelize this expensive operation for better performance with large datasets
+                // Sequential processing over reads to avoid nested parallelism overhead
                 let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .par_iter()
+                    .iter()
                     .map(|&read_idx| {
                         let read = &self.reads[read_idx];
                         haplotypes
@@ -888,9 +906,8 @@ impl HaplotypeEstimationProblem {
                     }
                 }
                 // Pre-calculate mismatch probabilities
-                // Parallelize this expensive operation for better performance with large datasets
                 let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .par_iter()
+                    .iter()
                     .map(|&read_idx| {
                         let read = &self.reads[read_idx];
                         haplotypes
@@ -1479,7 +1496,7 @@ fn propose_haplotypes(
         sa_max_temperature: optimization_parameters.sa_max_temperature,
         original_read_length: optimization_parameters.original_read_length,
         seed: optimization_parameters.seed,
-        mismatch_prob_cache: Arc::new(DashMap::new()),
+        mismatch_prob_cache: Cache::new(10_000_000),
         reads_by_sample,
     };
     info!(
@@ -1506,7 +1523,11 @@ fn propose_haplotypes(
     let solver = SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, rng)
         .unwrap()
         .with_temp_func(SATempFunc::TemperatureFast)
-        .with_reannealing_fixed(optimization_parameters.sa_iterations as u64);
+        .with_reannealing_fixed(optimization_parameters.sa_reannealing_fixed)
+        .with_reannealing_accepted(optimization_parameters.sa_reannealing_accepted)
+        .with_reannealing_best(optimization_parameters.sa_reannealing_best)
+        .with_stall_accepted(optimization_parameters.sa_stall_accepted)
+        .with_stall_best(optimization_parameters.sa_stall_best);
     // Optimize initial haplotypes with EM before starting SA
     let mut best_haplotypes = initial_haplotypes.clone();
     info!(
@@ -1632,6 +1653,11 @@ fn main() -> Result<()> {
         sa_reruns: args.sa_reruns,
         original_read_length: reads[0].sequence.len(),
         seed: args.seed,
+        sa_reannealing_accepted: args.sa_reannealing_accepted,
+        sa_reannealing_best: args.sa_reannealing_best,
+        sa_reannealing_fixed: args.sa_reannealing_fixed,
+        sa_stall_accepted: args.sa_stall_accepted,
+        sa_stall_best: args.sa_stall_best,
     };
     let proposed_haplotypes = propose_haplotypes(
         &variant_only_reads,
@@ -1711,7 +1737,7 @@ mod tests {
             sa_max_temperature: 10.0,
             original_read_length: 100,
             seed: Some(12345),
-            mismatch_prob_cache: Arc::new(DashMap::new()),
+            mismatch_prob_cache: Cache::new(10_000_000),
             reads_by_sample: vec![],
         }
     }

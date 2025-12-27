@@ -1522,7 +1522,7 @@ fn propose_haplotypes(
     };
     let solver = SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, rng)
         .unwrap()
-        .with_temp_func(SATempFunc::TemperatureFast)
+        .with_temp_func(SATempFunc::Boltzmann)
         .with_reannealing_fixed(optimization_parameters.sa_reannealing_fixed)
         .with_reannealing_accepted(optimization_parameters.sa_reannealing_accepted)
         .with_reannealing_best(optimization_parameters.sa_reannealing_best)

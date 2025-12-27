@@ -605,6 +605,7 @@ impl HaplotypeEstimationProblem {
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
+        let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
         // Process all samples in parallel - each sample is completely independent
         // Collect frequency results: Vec<Vec<f64>> where outer = samples, inner = haplotype freqs
         let sample_frequencies: Vec<Vec<f64>> = self
@@ -632,20 +633,12 @@ impl HaplotypeEstimationProblem {
                         *val /= sum;
                     }
                 }
-                // Pre-calculate mismatch probabilities (equivalent to proposed->mismatches in C)
-                // Parallelize this expensive operation for better performance with large datasets
-                let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .par_iter()
-                    .map(|&read_idx| {
-                        let read = &self.reads[read_idx];
-                        haplotypes
-                            .iter()
-                            .map(|hap| self.compute_mismatch_probability(read, hap))
-                            .collect()
-                    })
+                let mismatches: Vec<&[f64]> = sample_read_indices
+                    .iter()
+                    .map(|&read_idx| mismatch_matrix[read_idx].as_slice())
                     .collect();
                 // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
-                let mut mismatch_fp_new = mismatches
+                let mut mismatch_fp_new: Vec<Vec<f64>> = mismatches
                     .iter()
                     .map(|row| row.iter().zip(&theta_new).map(|(&m, &t)| m * t).collect())
                     .collect();
@@ -873,6 +866,7 @@ impl HaplotypeEstimationProblem {
         convergence_delta: f64,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
+        let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
         // Process all samples in parallel - each sample is completely independent
         // Collect frequency results: Vec<Vec<f64>> where outer = samples, inner = haplotype freqs
         let sample_frequencies: Vec<Vec<f64>> = self
@@ -910,17 +904,9 @@ impl HaplotypeEstimationProblem {
                         *val /= sum;
                     }
                 }
-                // Pre-calculate mismatch probabilities
-                // Parallelize this expensive operation for better performance with large datasets
-                let mismatches: Vec<Vec<f64>> = sample_read_indices
-                    .par_iter()
-                    .map(|&read_idx| {
-                        let read = &self.reads[read_idx];
-                        haplotypes
-                            .iter()
-                            .map(|hap| self.compute_mismatch_probability(read, hap))
-                            .collect()
-                    })
+                let mismatches: Vec<&[f64]> = sample_read_indices
+                    .iter()
+                    .map(|&read_idx| mismatch_matrix[read_idx].as_slice())
                     .collect();
                 // Initialize mismatch_fp_new = mismatches * theta (like mismatchesFP_new in C)
                 let mut mismatch_fp_new: Vec<Vec<f64>> = mismatches

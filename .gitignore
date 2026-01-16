@@ -22,3 +22,6 @@ target/
 
 # macOS
 .DS_Store
+
+# Jupyter
+analysis/.ipynb_checkpoints/

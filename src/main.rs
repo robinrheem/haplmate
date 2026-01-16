@@ -1754,19 +1754,23 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
     }
     let reads = extract_reads(&args.files);
     let original_read_length = reads[0].sequence.len();
-    let (variant_only_reads, _invariant_positions) = remove_invariants(&reads);
+    let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
+
+    // Parse haplotypes from CSV and remove the SAME invariant positions as determined by reads
     let haplotypes = parse_haplotypes_csv(&args.haplotypes_csv, &args.files)?;
+    let invariant_indices: HashSet<usize> =
+        invariant_positions.iter().map(|(pos, _)| *pos).collect();
     let variant_only_haplotypes: Vec<Haplotype> = haplotypes
         .into_iter()
-        .map(|h| {
-            let (variant_reads, _) = remove_invariants(&vec![Read {
-                sequence: h.sequence,
-                sample: String::new(),
-            }]);
-            Haplotype {
-                sequence: variant_reads[0].sequence.clone(),
-                frequencies: h.frequencies,
-            }
+        .map(|h| Haplotype {
+            sequence: h
+                .sequence
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !invariant_indices.contains(i))
+                .map(|(_, &b)| b)
+                .collect(),
+            frequencies: h.frequencies,
         })
         .collect();
     let mut reads_by_sample: Vec<Vec<usize>> = vec![Vec::new(); args.files.len()];

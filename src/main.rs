@@ -69,6 +69,9 @@ struct Args {
     /// SA stall detection after n iterations without best cost improvement
     #[arg(long, default_value_t = u64::MAX)]
     sa_stall_best: u64,
+    /// Number of threads to use for parallelization (defaults to number of CPUs)
+    #[arg(short = 't', long)]
+    threads: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1611,6 +1614,12 @@ fn main() -> Result<()> {
         .with_max_level(tracing::Level::TRACE)
         .init();
     let mut args = Args::parse();
+    if let Some(num_threads) = args.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .expect("Failed to initialize thread pool");
+    }
     args.files.sort_by(|a, b| natord::compare(a, b));
 
     let unaligned = unaligned_samples(&args.files)?;

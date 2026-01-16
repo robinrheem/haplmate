@@ -12,12 +12,34 @@ use std::process::exit;
 use tracing::{debug, info, trace};
 use tracing_subscriber;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// Estimating haplotypes with Simulated Annealing and Expectation-Maximization
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
+    /// Number of threads to use for parallelization (defaults to number of CPUs)
+    #[arg(short = 't', long, global = true)]
+    threads: Option<usize>,
+
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    estimate: EstimateArgs,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Estimate haplotypes from FASTA files (default behavior)
+    Estimate(EstimateArgs),
+    /// Calculate cost for given haplotypes and reads
+    Cost(CostArgs),
+}
+
+#[derive(Debug, Parser, Default)]
+struct EstimateArgs {
     /// Input FASTA file(s)
     #[arg(value_name = "FILE", default_value = "-")]
     files: Vec<String>,
@@ -69,9 +91,28 @@ struct Args {
     /// SA stall detection after n iterations without best cost improvement
     #[arg(long, default_value_t = u64::MAX)]
     sa_stall_best: u64,
-    /// Number of threads to use for parallelization (defaults to number of CPUs)
-    #[arg(short = 't', long)]
-    threads: Option<usize>,
+}
+
+#[derive(Debug, Parser)]
+struct CostArgs {
+    /// Input FASTA file(s) containing reads
+    #[arg(value_name = "FILE")]
+    files: Vec<String>,
+    /// CSV file containing haplotypes (same format as output)
+    #[arg(short = 'c', long, required = true)]
+    haplotypes_csv: String,
+    /// Maximum allowed mismatch between haplotypes and reads
+    #[arg(short = 'm', long, default_value = "15")]
+    mismatches: usize,
+    /// Lambda1 value (recombination penalty)
+    #[arg(long, default_value = "0.0001")]
+    lambda1: f64,
+    /// Lambda2 value (haplotype count penalty)
+    #[arg(long, default_value = "0.0001")]
+    lambda2: f64,
+    /// Sequencing error rate
+    #[arg(short = 'd', long, default_value = "0.00001")]
+    error_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +181,59 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
         })
         .map(|sample| sample.as_str())
         .collect())
+}
+
+/// Parse haplotypes from a CSV file
+///
+/// # Arguments
+///
+/// * `csv_path` - Path to the CSV file
+/// * `samples` - List of sample names to match against CSV columns
+///
+/// # Returns
+///
+/// A vector of Haplotype structs parsed from the CSV
+fn parse_haplotypes_csv(csv_path: &str, samples: &[String]) -> Result<Vec<Haplotype>> {
+    let content = std::fs::read_to_string(csv_path)?;
+    let mut lines = content.lines();
+    let header = lines
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("CSV file is empty"))?;
+    let columns: Vec<&str> = header.split(',').collect();
+    let sample_indices: Vec<usize> = samples
+        .iter()
+        .map(|sample| {
+            columns
+                .iter()
+                .position(|col| col == sample)
+                .unwrap_or_else(|| panic!("Sample '{}' not found in CSV header", sample))
+        })
+        .collect();
+    let mut haplotypes = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.is_empty() {
+            continue;
+        }
+        if fields[0] == "SUM" {
+            continue;
+        }
+        let sequence = fields[0].as_bytes().to_vec();
+        let frequencies: Vec<f64> = sample_indices
+            .iter()
+            .map(|&idx| {
+                fields
+                    .get(idx)
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(0.0)
+            })
+            .collect();
+        haplotypes.push(Haplotype {
+            sequence,
+            frequencies,
+        });
+    }
+    Ok(haplotypes)
 }
 
 /// Remove all invariants from all reads and track their positions
@@ -1529,7 +1623,8 @@ fn propose_haplotypes(
     let sa_progress = optimization_parameters.sa_max_temperature;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta) {
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
+    {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -1597,31 +1692,9 @@ fn haplotype_frequencies_output(
     output
 }
 
-/// Main function
-///
-/// TODO: Parallel processing
-///
-/// # Arguments
-///
-/// * `args` - Command line arguments
-///
-/// # Returns
-///
-/// * `Ok(())` - If the program runs successfully
-/// * `Err(anyhow::Error)` - If there was an error
-fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .init();
-    let mut args = Args::parse();
-    if let Some(num_threads) = args.threads {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build_global()
-            .expect("Failed to initialize thread pool");
-    }
+/// Run the estimate subcommand
+fn run_estimate(mut args: EstimateArgs) -> Result<()> {
     args.files.sort_by(|a, b| natord::compare(a, b));
-
     let unaligned = unaligned_samples(&args.files)?;
     if !unaligned.is_empty() {
         unaligned
@@ -1667,6 +1740,81 @@ fn main() -> Result<()> {
         std::fs::write(output_file, output).unwrap();
     }
     Ok(())
+}
+
+/// Run the cost subcommand
+fn run_cost(mut args: CostArgs) -> Result<()> {
+    args.files.sort_by(|a, b| natord::compare(a, b));
+    let unaligned = unaligned_samples(&args.files)?;
+    if !unaligned.is_empty() {
+        unaligned
+            .iter()
+            .for_each(|sample| eprintln!("Sample {sample} is not aligned"));
+        exit(1);
+    }
+    let reads = extract_reads(&args.files);
+    let original_read_length = reads[0].sequence.len();
+    let (variant_only_reads, _invariant_positions) = remove_invariants(&reads);
+    let haplotypes = parse_haplotypes_csv(&args.haplotypes_csv, &args.files)?;
+    let variant_only_haplotypes: Vec<Haplotype> = haplotypes
+        .into_iter()
+        .map(|h| {
+            let (variant_reads, _) = remove_invariants(&vec![Read {
+                sequence: h.sequence,
+                sample: String::new(),
+            }]);
+            Haplotype {
+                sequence: variant_reads[0].sequence.clone(),
+                frequencies: h.frequencies,
+            }
+        })
+        .collect();
+    let mut reads_by_sample: Vec<Vec<usize>> = vec![Vec::new(); args.files.len()];
+    for (read_idx, read) in variant_only_reads.iter().enumerate() {
+        if let Some(sample_idx) = args.files.iter().position(|s| s == &read.sample) {
+            reads_by_sample[sample_idx].push(read_idx);
+        }
+    }
+    // Create the problem instance to compute cost
+    let problem = HaplotypeEstimationProblem::new(
+        args.files.clone(),
+        variant_only_reads.clone(),
+        args.error_rate,
+        args.lambda1,
+        args.lambda2,
+        args.mismatches,
+        1,   // em_iterations not used for cost calculation
+        0.0, // em_convergence_delta not used
+        0.0, // sa_max_temperature not used
+        original_read_length,
+        None, // seed not used
+        reads_by_sample,
+    );
+    let cost = problem.cost(&variant_only_haplotypes)?;
+    println!("Total cost: {}", cost);
+    Ok(())
+}
+
+/// Main function
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .init();
+    let args = Args::parse();
+    if let Some(num_threads) = args.threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global()
+            .expect("Failed to initialize thread pool");
+    }
+    match args.command {
+        Some(Command::Estimate(estimate_args)) => run_estimate(estimate_args),
+        Some(Command::Cost(cost_args)) => run_cost(cost_args),
+        None => {
+            // Default behavior: run estimate with flattened args
+            run_estimate(args.estimate)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1722,18 +1870,18 @@ mod tests {
 
     fn create_test_problem() -> HaplotypeEstimationProblem {
         HaplotypeEstimationProblem::new(
-            vec![],           // samples
-            vec![],           // reads
-            0.01,             // error_rate
-            1.0,              // lambda1
-            1.0,              // lambda2
-            3,                // em_max_mismatches
-            100,              // em_iterations
-            0.001,            // em_convergence_delta
-            10.0,             // sa_max_temperature
-            100,              // original_read_length
-            Some(12345),      // seed
-            vec![],           // reads_by_sample
+            vec![],      // samples
+            vec![],      // reads
+            0.01,        // error_rate
+            1.0,         // lambda1
+            1.0,         // lambda2
+            3,           // em_max_mismatches
+            100,         // em_iterations
+            0.001,       // em_convergence_delta
+            10.0,        // sa_max_temperature
+            100,         // original_read_length
+            Some(12345), // seed
+            vec![],      // reads_by_sample
         )
     }
 

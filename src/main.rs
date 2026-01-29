@@ -1703,7 +1703,16 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         exit(1);
     }
     let reads = extract_reads(&args.files);
+    info!(
+        "Original read length: {} nucleotides",
+        reads[0].sequence.len()
+    );
     let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
+    info!(
+        "Read length after removing {} invariant positions: {} nucleotides",
+        invariant_positions.len(),
+        variant_only_reads[0].sequence.len()
+    );
     let initial_haplotypes = init_haplotypes(&variant_only_reads, &args.files);
     if initial_haplotypes.len() == 1 && initial_haplotypes[0].sequence.is_empty() {
         eprintln!("No initial haplotypes that have meaningful information");
@@ -1754,7 +1763,13 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
     }
     let reads = extract_reads(&args.files);
     let original_read_length = reads[0].sequence.len();
+    info!("Original read length: {} nucleotides", original_read_length);
     let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
+    info!(
+        "Read length after removing {} invariant positions: {} nucleotides",
+        invariant_positions.len(),
+        variant_only_reads[0].sequence.len()
+    );
 
     // Parse haplotypes from CSV and remove the SAME invariant positions as determined by reads
     let haplotypes = parse_haplotypes_csv(&args.haplotypes_csv, &args.files)?;

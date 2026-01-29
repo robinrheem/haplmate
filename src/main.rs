@@ -258,9 +258,9 @@ fn remove_invariants(reads: &Vec<Read>) -> (Vec<Read>, Vec<(usize, u8)>) {
 
         // If only one type of nucleotide (or all gaps), it's invariant
         if unique_nucleotides.len() <= 1 {
-            if let Some(&nucleotide) = unique_nucleotides.iter().next() {
-                invariant_positions.push((i, nucleotide));
-            }
+            // For all-gap positions, use '-' as the nucleotide
+            let nucleotide = unique_nucleotides.iter().next().copied().unwrap_or(b'-');
+            invariant_positions.push((i, nucleotide));
             continue;
         }
         for (j, c) in column.into_iter().enumerate() {

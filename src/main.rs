@@ -146,6 +146,8 @@ struct OptimizationParameters {
     sa_reannealing_fixed: u64,
     sa_stall_accepted: u64,
     sa_stall_best: u64,
+    /// Per-position nucleotide frequencies [A, C, G, T] for MAF-based mutation
+    nucleotide_frequencies: Vec<[f64; 4]>,
 }
 
 /// Check whether all reads in samples are aligned
@@ -512,6 +514,46 @@ fn init_haplotypes(reads: &Vec<Read>, samples: &Vec<String>) -> Vec<Haplotype> {
     haplotypes
 }
 
+/// Compute per-position nucleotide frequencies from reads
+///
+/// # Arguments
+///
+/// * `reads` - A list of reads
+///
+/// # Returns
+///
+/// A vector where each element is [A_freq, C_freq, G_freq, T_freq] for that position
+fn compute_nucleotide_frequencies(reads: &[Read]) -> Vec<[f64; 4]> {
+    if reads.is_empty() {
+        return Vec::new();
+    }
+    let sequence_length = reads[0].sequence.len();
+    let mut frequencies = vec![[0.0; 4]; sequence_length];
+
+    for pos in 0..sequence_length {
+        let mut counts = [0usize; 4]; // A, C, G, T
+        for read in reads {
+            match read.sequence[pos] {
+                b'A' => counts[0] += 1,
+                b'C' => counts[1] += 1,
+                b'G' => counts[2] += 1,
+                b'T' => counts[3] += 1,
+                _ => {} // Skip gaps and other characters
+            }
+        }
+        let total: usize = counts.iter().sum();
+        if total > 0 {
+            for i in 0..4 {
+                frequencies[pos][i] = counts[i] as f64 / total as f64;
+            }
+        } else {
+            // If all gaps, use uniform distribution
+            frequencies[pos] = [0.25, 0.25, 0.25, 0.25];
+        }
+    }
+    frequencies
+}
+
 /// Restore invariant positions to a sequence
 ///
 /// # Arguments
@@ -570,6 +612,8 @@ struct HaplotypeEstimationProblem {
     reads_by_sample: Vec<Vec<usize>>,
     // Pre-computed binomial PMF lookup table: mismatch_prob_table[num_mismatches] = probability
     mismatch_prob_table: Vec<f64>,
+    // Per-position nucleotide frequencies [A, C, G, T] for MAF-based mutation
+    nucleotide_frequencies: Vec<[f64; 4]>,
 }
 
 impl HaplotypeEstimationProblem {
@@ -586,6 +630,7 @@ impl HaplotypeEstimationProblem {
         original_read_length: usize,
         seed: Option<u64>,
         reads_by_sample: Vec<Vec<usize>>,
+        nucleotide_frequencies: Vec<[f64; 4]>,
     ) -> Self {
         // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
         let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
@@ -609,6 +654,7 @@ impl HaplotypeEstimationProblem {
             seed,
             reads_by_sample,
             mismatch_prob_table,
+            nucleotide_frequencies,
         }
     }
 
@@ -1348,6 +1394,7 @@ impl HaplotypeEstimationProblem {
     }
 
     /// Applies mutation operation to create a new haplotype
+    /// Uses MAF distribution to sample the new nucleotide at each position
     fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
         let idx_to_copy = rng.gen_range(0..haplotypes.len());
         let mut attempts = 0;
@@ -1362,7 +1409,23 @@ impl HaplotypeEstimationProblem {
             }
             let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
             let pos_to_change = rng.gen_range(0..new_sequence.len());
-            let new_nucleotide = [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)];
+            // Sample nucleotide based on MAF distribution at this position
+            let new_nucleotide = if pos_to_change < self.nucleotide_frequencies.len() {
+                let freqs = &self.nucleotide_frequencies[pos_to_change];
+                let r: f64 = rng.gen();
+                if r < freqs[0] {
+                    b'A'
+                } else if r < freqs[0] + freqs[1] {
+                    b'C'
+                } else if r < freqs[0] + freqs[1] + freqs[2] {
+                    b'G'
+                } else {
+                    b'T'
+                }
+            } else {
+                // Fallback to uniform if position out of range
+                [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)]
+            };
             trace!(
                 "Mutating haplotype {} at position {} to {} (attempt {})",
                 idx_to_copy,
@@ -1578,6 +1641,7 @@ fn propose_haplotypes(
         optimization_parameters.original_read_length,
         optimization_parameters.seed,
         reads_by_sample,
+        optimization_parameters.nucleotide_frequencies.clone(),
     );
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
@@ -1714,6 +1778,7 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         eprintln!("No initial haplotypes that have meaningful information");
         exit(1);
     }
+    let nucleotide_frequencies = compute_nucleotide_frequencies(&variant_only_reads);
     let optimization_parameters = OptimizationParameters {
         samples: args.files.clone(),
         max_mismatches: args.mismatches,
@@ -1732,6 +1797,7 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         sa_reannealing_fixed: args.sa_reannealing_fixed,
         sa_stall_accepted: args.sa_stall_accepted,
         sa_stall_best: args.sa_stall_best,
+        nucleotide_frequencies,
     };
     let proposed_haplotypes = propose_haplotypes(
         &variant_only_reads,
@@ -1804,6 +1870,7 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
         original_read_length,
         None, // seed not used
         reads_by_sample,
+        Vec::new(), // nucleotide_frequencies not used for cost calculation
     );
     let cost = problem.cost(&variant_only_haplotypes)?;
     println!("Total cost: {}", cost);
@@ -1897,6 +1964,7 @@ mod tests {
             100,         // original_read_length
             Some(12345), // seed
             vec![],      // reads_by_sample
+            vec![],      // nucleotide_frequencies
         )
     }
 

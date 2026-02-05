@@ -1244,29 +1244,18 @@ impl HaplotypeEstimationProblem {
         // Determine which operation to perform based on current state
         let operation: i32 = if haplotypes.len() == 1 {
             debug!("Only one haplotype present, forcing add operation");
-            2 // Force add operation for single haplotype
+            1 // Force add operation for single haplotype
         } else {
-            rng.gen_range(0..3)
+            rng.gen_range(0..2)
         };
-
         match operation {
-            0 if haplotypes.len() > 1 => {
-                // Delete a random haplotype
-                let idx_to_remove = rng.gen_range(0..haplotypes.len());
-                debug!(
-                    "Operation: Delete - Removing haplotype at index {}",
-                    idx_to_remove
-                );
-                haplotypes.remove(idx_to_remove);
-                true
-            }
-            1 if haplotypes.len() >= 2 => {
+            0 if haplotypes.len() >= 2 => {
                 // Recombine two random haplotypes
                 debug!("Operation: Recombine");
                 self.recombine(haplotypes, rng);
                 true
             }
-            2 if haplotypes.len() < self.reads.len() => {
+            1 if haplotypes.len() < self.reads.len() => {
                 // Add a new haplotype by mutating an existing one
                 debug!("Operation: Add new haplotype by mutation");
                 self.mutate(haplotypes, rng);
@@ -1470,10 +1459,9 @@ impl Anneal for HaplotypeEstimationProblem {
 
     /// Performs a single annealing step by randomly modifying the current set of haplotypes.
     ///
-    /// This function implements three possible operations, chosen randomly:
-    /// 1. Delete a random haplotype (if there are at least 2 haplotypes)
-    /// 2. Recombine two random haplotypes by performing a crossover (if there are at least 2 haplotypes)
-    /// 3. Add a new haplotype by mutating an existing one (if number of haplotypes < number of reads)
+    /// This function implements two possible operations, chosen randomly:
+    /// 1. Recombine two random haplotypes by performing a crossover (if there are at least 2 haplotypes)
+    /// 2. Add a new haplotype by mutating an existing one (if number of haplotypes < number of reads)
     ///
     /// After structural modifications, it runs Square EM to optimize the frequencies.
     /// If EM removes all haplotypes, it retries with different operations (matching C code behavior).

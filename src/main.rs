@@ -91,6 +91,9 @@ struct EstimateArgs {
     /// SA stall detection after n iterations without best cost improvement
     #[arg(long, default_value_t = u64::MAX)]
     sa_stall_best: u64,
+    /// Number of crossover points for recombination (more points = more diversity)
+    #[arg(long, default_value = "2")]
+    recombination_points: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -148,6 +151,8 @@ struct OptimizationParameters {
     sa_stall_best: u64,
     /// Per-position nucleotide frequencies [A, C, G, T] for MAF-based mutation
     nucleotide_frequencies: Vec<[f64; 4]>,
+    /// Number of crossover points for recombination
+    recombination_points: usize,
 }
 
 /// Check whether all reads in samples are aligned
@@ -614,6 +619,8 @@ struct HaplotypeEstimationProblem {
     mismatch_prob_table: Vec<f64>,
     // Per-position nucleotide frequencies [A, C, G, T] for MAF-based mutation
     nucleotide_frequencies: Vec<[f64; 4]>,
+    // Number of crossover points for recombination
+    recombination_points: usize,
 }
 
 impl HaplotypeEstimationProblem {
@@ -631,6 +638,7 @@ impl HaplotypeEstimationProblem {
         seed: Option<u64>,
         reads_by_sample: Vec<Vec<usize>>,
         nucleotide_frequencies: Vec<[f64; 4]>,
+        recombination_points: usize,
     ) -> Self {
         // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
         let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
@@ -655,6 +663,7 @@ impl HaplotypeEstimationProblem {
             reads_by_sample,
             mismatch_prob_table,
             nucleotide_frequencies,
+            recombination_points,
         }
     }
 
@@ -1314,15 +1323,27 @@ impl HaplotypeEstimationProblem {
         }
     }
 
-    /// Applies recombination operation between two random haplotypes
+    /// Applies multi-point recombination operation between two random haplotypes.
+    /// Generates ALL possible recombinant children from the crossover points.
+    ///
+    /// # Arguments
+    /// * `haplotypes` - The haplotype set to modify
+    /// * `rng` - Random number generator to use
+    ///
+    /// # Crossover mechanism
+    /// With n crossover points creating n+1 segments, each segment can come from either parent.
+    /// This generates 2^(n+1) - 2 possible recombinants (excluding the pure parents).
+    ///
+    /// For example, with 2 crossover points (3 segments [A, B, C]):
+    /// - Parent 1 provides: a1, b1, c1
+    /// - Parent 2 provides: a2, b2, c2
+    /// - Possible children: [a1,b1,c2], [a1,b2,c1], [a1,b2,c2], [a2,b1,c1], [a2,b1,c2], [a2,b2,c1]
     fn recombine(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
         let idx1 = rng.gen_range(0..haplotypes.len());
         let mut idx2 = rng.gen_range(0..haplotypes.len());
         let mut attempts = 0;
         const MAX_ATTEMPTS: i32 = 100;
-
         trace!("Initial recombination pair: indices {} and {}", idx1, idx2);
-
         // Try to find compatible haplotypes for recombination
         loop {
             if attempts >= MAX_ATTEMPTS {
@@ -1338,51 +1359,96 @@ impl HaplotypeEstimationProblem {
                 attempts += 1;
                 continue;
             }
-
-            let crossover_point = rng.gen_range(0..haplotypes[idx1].sequence.len());
+            let seq_len = haplotypes[idx1].sequence.len();
+            // Generate multiple unique crossover points and sort them
+            let num_points = self.recombination_points.min(seq_len.saturating_sub(1));
+            if num_points == 0 {
+                debug!("Sequence too short for recombination");
+                return;
+            }
+            let mut crossover_points: Vec<usize> = Vec::with_capacity(num_points);
+            while crossover_points.len() < num_points {
+                let point = rng.gen_range(1..seq_len); // Start from 1 to ensure meaningful crossover
+                if !crossover_points.contains(&point) {
+                    crossover_points.push(point);
+                }
+            }
+            crossover_points.sort_unstable();
             debug!(
-                "Performing recombination at position {} between haplotypes {} and {}",
-                crossover_point, idx1, idx2
+                "Performing multi-point recombination at positions {:?} between haplotypes {} and {}",
+                crossover_points, idx1, idx2
             );
+            // Extract segments from both parents
+            let parent1 = &haplotypes[idx1].sequence;
+            let parent2 = &haplotypes[idx2].sequence;
+            let num_segments = crossover_points.len() + 1;
+            // Build segment boundaries: [0, crossover_points..., seq_len]
+            let mut boundaries = Vec::with_capacity(num_segments + 1);
+            boundaries.push(0);
+            boundaries.extend(&crossover_points);
+            boundaries.push(seq_len);
+            // Extract segments from both parents
+            let mut segments1: Vec<&[u8]> = Vec::with_capacity(num_segments);
+            let mut segments2: Vec<&[u8]> = Vec::with_capacity(num_segments);
+            for i in 0..num_segments {
+                segments1.push(&parent1[boundaries[i]..boundaries[i + 1]]);
+                segments2.push(&parent2[boundaries[i]..boundaries[i + 1]]);
+            }
 
-            let mut recombined1 = haplotypes[idx1].sequence.clone();
-            let mut recombined2 = haplotypes[idx2].sequence.clone();
-            recombined1[crossover_point..]
-                .copy_from_slice(&haplotypes[idx2].sequence[crossover_point..]);
-            recombined2[crossover_point..]
-                .copy_from_slice(&haplotypes[idx1].sequence[crossover_point..]);
-
+            // Generate all 2^num_segments combinations (each bit decides which parent for that segment)
+            // Skip 0 (all from parent1 = pure parent1) and 2^n-1 (all from parent2 = pure parent2)
+            let num_combinations = 1usize << num_segments; // 2^num_segments
             let mut new_sequences = Vec::new();
-            if !haplotypes.iter().any(|h| h.sequence == recombined1) {
-                trace!("Adding first recombined sequence");
-                new_sequences.push(recombined1);
+
+            for combo in 1..(num_combinations - 1) {
+                let mut child = Vec::with_capacity(seq_len);
+                for seg_idx in 0..num_segments {
+                    // If bit is set, take from parent2; otherwise from parent1
+                    if (combo >> seg_idx) & 1 == 1 {
+                        child.extend_from_slice(segments2[seg_idx]);
+                    } else {
+                        child.extend_from_slice(segments1[seg_idx]);
+                    }
+                }
+
+                // Only add if this sequence doesn't already exist
+                if !haplotypes.iter().any(|h| h.sequence == child)
+                    && !new_sequences.contains(&child)
+                {
+                    new_sequences.push(child);
+                }
             }
-            if !haplotypes.iter().any(|h| h.sequence == recombined2) {
-                trace!("Adding second recombined sequence");
-                new_sequences.push(recombined2);
-            }
+
             debug!("Generated {} new unique sequences", new_sequences.len());
-            // Must generate exactly 2 new sequences, otherwise retry
-            if new_sequences.len() != 2 {
-                trace!("Did not generate 2 new sequences, retrying with different indices");
+
+            // Need at least 1 new sequence to proceed
+            if new_sequences.is_empty() {
+                trace!("No new unique sequences generated, retrying with different indices");
                 idx2 = rng.gen_range(0..haplotypes.len());
                 attempts += 1;
                 continue;
             }
+            // Calculate frequency distribution for new haplotypes
             let original_freq1: Vec<f64> = haplotypes[idx1].frequencies.clone();
             let original_freq2: Vec<f64> = haplotypes[idx2].frequencies.clone();
+            // Split parent frequencies among all new children
+            // Each parent contributes half its frequency, distributed among all new children
+            let num_new = new_sequences.len();
+            let freq_per_child = 1.0 / (num_new as f64 + 2.0); // +2 for the two parents
+                                                               // Reduce parent frequencies
             for freq in &mut haplotypes[idx1].frequencies {
-                *freq /= 2.0;
+                *freq *= freq_per_child;
             }
             for freq in &mut haplotypes[idx2].frequencies {
-                *freq /= 2.0;
+                *freq *= freq_per_child;
             }
+            // Add new haplotypes with combined frequencies
             for new_seq in new_sequences {
                 let mut combined_frequencies = vec![0.0; self.samples.len()];
                 for s in 0..self.samples.len() {
                     let freq1 = original_freq1.get(s).unwrap_or(&0.0);
                     let freq2 = original_freq2.get(s).unwrap_or(&0.0);
-                    combined_frequencies[s] = (freq1 + freq2) / 4.0;
+                    combined_frequencies[s] = (freq1 + freq2) * freq_per_child;
                 }
                 haplotypes.push(Haplotype {
                     sequence: new_seq,
@@ -1642,6 +1708,7 @@ fn propose_haplotypes(
         optimization_parameters.seed,
         reads_by_sample,
         optimization_parameters.nucleotide_frequencies.clone(),
+        optimization_parameters.recombination_points,
     );
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
@@ -1798,6 +1865,7 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         sa_stall_accepted: args.sa_stall_accepted,
         sa_stall_best: args.sa_stall_best,
         nucleotide_frequencies,
+        recombination_points: args.recombination_points,
     };
     let proposed_haplotypes = propose_haplotypes(
         &variant_only_reads,
@@ -1871,6 +1939,7 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
         None, // seed not used
         reads_by_sample,
         Vec::new(), // nucleotide_frequencies not used for cost calculation
+        0,          // recombination_points not used for cost calculation
     );
     let cost = problem.cost(&variant_only_haplotypes)?;
     println!("Total cost: {}", cost);
@@ -1965,6 +2034,7 @@ mod tests {
             Some(12345), // seed
             vec![],      // reads_by_sample
             vec![],      // nucleotide_frequencies
+            2,           // recombination_points
         )
     }
 

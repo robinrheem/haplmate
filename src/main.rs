@@ -94,6 +94,9 @@ struct EstimateArgs {
     /// Number of crossover points for recombination (more points = more diversity)
     #[arg(long, default_value = "2")]
     recombination_points: usize,
+    /// Number of recombine/mutate operations per annealing step (more = faster exploration)
+    #[arg(long, default_value = "3")]
+    operations_per_step: usize,
 }
 
 #[derive(Debug, Parser)]
@@ -153,6 +156,8 @@ struct OptimizationParameters {
     nucleotide_frequencies: Vec<[f64; 4]>,
     /// Number of crossover points for recombination
     recombination_points: usize,
+    /// Number of recombine/mutate operations per annealing step
+    operations_per_step: usize,
 }
 
 /// Check whether all reads in samples are aligned
@@ -621,6 +626,8 @@ struct HaplotypeEstimationProblem {
     nucleotide_frequencies: Vec<[f64; 4]>,
     // Number of crossover points for recombination
     recombination_points: usize,
+    // Number of recombine/mutate operations per annealing step
+    operations_per_step: usize,
 }
 
 impl HaplotypeEstimationProblem {
@@ -639,6 +646,7 @@ impl HaplotypeEstimationProblem {
         reads_by_sample: Vec<Vec<usize>>,
         nucleotide_frequencies: Vec<[f64; 4]>,
         recombination_points: usize,
+        operations_per_step: usize,
     ) -> Self {
         // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
         let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
@@ -664,6 +672,7 @@ impl HaplotypeEstimationProblem {
             mismatch_prob_table,
             nucleotide_frequencies,
             recombination_points,
+            operations_per_step,
         }
     }
 
@@ -1394,12 +1403,10 @@ impl HaplotypeEstimationProblem {
                 segments1.push(&parent1[boundaries[i]..boundaries[i + 1]]);
                 segments2.push(&parent2[boundaries[i]..boundaries[i + 1]]);
             }
-
             // Generate all 2^num_segments combinations (each bit decides which parent for that segment)
             // Skip 0 (all from parent1 = pure parent1) and 2^n-1 (all from parent2 = pure parent2)
             let num_combinations = 1usize << num_segments; // 2^num_segments
             let mut new_sequences = Vec::new();
-
             for combo in 1..(num_combinations - 1) {
                 let mut child = Vec::with_capacity(seq_len);
                 for seg_idx in 0..num_segments {
@@ -1410,7 +1417,6 @@ impl HaplotypeEstimationProblem {
                         child.extend_from_slice(segments1[seg_idx]);
                     }
                 }
-
                 // Only add if this sequence doesn't already exist
                 if !haplotypes.iter().any(|h| h.sequence == child)
                     && !new_sequences.contains(&child)
@@ -1418,9 +1424,7 @@ impl HaplotypeEstimationProblem {
                     new_sequences.push(child);
                 }
             }
-
             debug!("Generated {} new unique sequences", new_sequences.len());
-
             // Need at least 1 new sequence to proceed
             if new_sequences.is_empty() {
                 trace!("No new unique sequences generated, retrying with different indices");
@@ -1458,7 +1462,6 @@ impl HaplotypeEstimationProblem {
             break;
         }
     }
-
     /// Applies mutation operation to create a new haplotype
     /// Uses MAF distribution to sample the new nucleotide at each position
     fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
@@ -1600,6 +1603,9 @@ impl Anneal for HaplotypeEstimationProblem {
     /// 1. Recombine two random haplotypes by performing a crossover (if there are at least 2 haplotypes)
     /// 2. Add a new haplotype by mutating an existing one (if number of haplotypes < number of reads)
     ///
+    /// Operations are performed `operations_per_step` times to "explode" the haplotype set
+    /// before running EM optimization.
+    ///
     /// After structural modifications, it runs Square EM to optimize the frequencies.
     /// If EM removes all haplotypes, it retries with different operations (matching C code behavior).
     ///
@@ -1617,7 +1623,10 @@ impl Anneal for HaplotypeEstimationProblem {
         param: &Self::Param,
         temp: Self::Float,
     ) -> Result<Self::Output, anyhow::Error> {
-        debug!("Starting annealing step with temperature {}", temp);
+        debug!(
+            "Starting annealing step with temperature {}, operations_per_step={}",
+            temp, self.operations_per_step
+        );
         if param.is_empty() {
             debug!("No haplotypes available for annealing operations, returning original set");
             return Ok(param.clone());
@@ -1637,10 +1646,24 @@ impl Anneal for HaplotypeEstimationProblem {
             } else {
                 rand::rngs::StdRng::from_entropy()
             };
-            // Apply random operation
-            if !self.random_operation(&mut haplotypes, &mut rng) {
+
+            // Apply random operations multiple times to "explode" the haplotype set
+            let mut operations_applied = 0;
+            for op_num in 0..self.operations_per_step {
+                if self.random_operation(&mut haplotypes, &mut rng) {
+                    operations_applied += 1;
+                    trace!(
+                        "Operation {}/{} applied, now have {} haplotypes",
+                        op_num + 1,
+                        self.operations_per_step,
+                        haplotypes.len()
+                    );
+                }
+            }
+
+            if operations_applied == 0 {
                 debug!(
-                    "No operation could be applied on attempt {}",
+                    "No operations could be applied on attempt {}",
                     retry_count + 1
                 );
                 if retry_count == MAX_RETRIES {
@@ -1648,7 +1671,12 @@ impl Anneal for HaplotypeEstimationProblem {
                 }
                 continue;
             }
-            debug!("Running EM optimization on {} haplotypes", haplotypes.len());
+
+            debug!(
+                "Applied {} operations, running EM optimization on {} haplotypes",
+                operations_applied,
+                haplotypes.len()
+            );
             self.expectation_maximization(&mut haplotypes, convergence_delta)?;
             if !haplotypes.is_empty() {
                 debug!(
@@ -1709,9 +1737,10 @@ fn propose_haplotypes(
         reads_by_sample,
         optimization_parameters.nucleotide_frequencies.clone(),
         optimization_parameters.recombination_points,
+        optimization_parameters.operations_per_step,
     );
     info!(
-        "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}",
+        "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}, recombination_points={}, operations_per_step={}",
         problem.samples.len(),
         reads.len(),
         optimization_parameters.error_rate,
@@ -1724,7 +1753,9 @@ fn propose_haplotypes(
         optimization_parameters.sa_iterations,
         optimization_parameters.sa_reruns,
         optimization_parameters.original_read_length,
-        optimization_parameters.seed
+        optimization_parameters.seed,
+        optimization_parameters.recombination_points,
+        optimization_parameters.operations_per_step
     );
     let rng = if let Some(seed) = optimization_parameters.seed {
         rand::rngs::StdRng::seed_from_u64(seed)
@@ -1866,6 +1897,7 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         sa_stall_best: args.sa_stall_best,
         nucleotide_frequencies,
         recombination_points: args.recombination_points,
+        operations_per_step: args.operations_per_step,
     };
     let proposed_haplotypes = propose_haplotypes(
         &variant_only_reads,
@@ -1940,6 +1972,7 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
         reads_by_sample,
         Vec::new(), // nucleotide_frequencies not used for cost calculation
         0,          // recombination_points not used for cost calculation
+        0,          // operations_per_step not used for cost calculation
     );
     let cost = problem.cost(&variant_only_haplotypes)?;
     println!("Total cost: {}", cost);
@@ -2035,6 +2068,7 @@ mod tests {
             vec![],      // reads_by_sample
             vec![],      // nucleotide_frequencies
             2,           // recombination_points
+            3,           // operations_per_step
         )
     }
 

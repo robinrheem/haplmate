@@ -1468,7 +1468,10 @@ impl HaplotypeEstimationProblem {
             // Generate all 2^num_segments combinations (each bit decides which parent for that segment)
             // Skip 0 (all from parent1 = pure parent1) and 2^n-1 (all from parent2 = pure parent2)
             let num_combinations = 1usize << num_segments; // 2^num_segments
-            let mut new_sequences = Vec::new();
+            let existing_sequences: AHashSet<&[u8]> =
+                haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
+            let mut new_sequences: Vec<Vec<u8>> = Vec::new();
+            let mut new_sequences_set: AHashSet<Vec<u8>> = AHashSet::new();
             for combo in 1..(num_combinations - 1) {
                 let mut child = Vec::with_capacity(seq_len);
                 for seg_idx in 0..num_segments {
@@ -1479,10 +1482,10 @@ impl HaplotypeEstimationProblem {
                         child.extend_from_slice(segments1[seg_idx]);
                     }
                 }
-                // Only add if this sequence doesn't already exist
-                if !haplotypes.iter().any(|h| h.sequence == child)
-                    && !new_sequences.contains(&child)
+                if !existing_sequences.contains(child.as_slice())
+                    && !new_sequences_set.contains(&child)
                 {
+                    new_sequences_set.insert(child.clone());
                     new_sequences.push(child);
                 }
             }
@@ -1538,6 +1541,8 @@ impl HaplotypeEstimationProblem {
         let idx_to_copy = rng.gen_range(0..haplotypes.len());
         let mut attempts = 0;
         const MAX_ATTEMPTS: usize = 100;
+        let existing_sequences: AHashSet<&[u8]> =
+            haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
         loop {
             if attempts >= MAX_ATTEMPTS {
                 debug!(
@@ -1573,8 +1578,7 @@ impl HaplotypeEstimationProblem {
                 attempts + 1
             );
             new_sequence[pos_to_change] = new_nucleotide;
-            // Only add if this sequence doesn't already exist
-            if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
+            if !existing_sequences.contains(new_sequence.as_slice()) {
                 // Check if this matches a true haplotype
                 let matches = self.check_true_haplotype_match(&new_sequence);
                 if !matches.is_empty() {

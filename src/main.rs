@@ -97,6 +97,9 @@ struct EstimateArgs {
     /// Number of recombine/mutate operations per annealing step (more = faster exploration)
     #[arg(long, default_value = "3")]
     operations_per_step: usize,
+    /// Path to CSV file containing true haplotypes for debugging/evaluation
+    #[arg(long)]
+    true_haplotypes_csv: Option<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -158,6 +161,8 @@ struct OptimizationParameters {
     recombination_points: usize,
     /// Number of recombine/mutate operations per annealing step
     operations_per_step: usize,
+    /// True haplotype sequences for debugging (variant positions only)
+    true_haplotype_sequences: Option<Vec<Vec<u8>>>,
 }
 
 /// Check whether all reads in samples are aligned
@@ -193,6 +198,45 @@ fn unaligned_samples<'a>(samples: &'a [String]) -> Result<Vec<&'a str>> {
         })
         .map(|sample| sample.as_str())
         .collect())
+}
+
+/// Parse only sequences from a haplotypes CSV file (for true haplotype comparison)
+///
+/// # Arguments
+///
+/// * `csv_path` - Path to the CSV file
+///
+/// # Returns
+///
+/// A vector of sequences (as Vec<u8>) parsed from the first column of the CSV
+fn parse_sequences_from_csv(csv_path: &str) -> Result<Vec<Vec<u8>>> {
+    let content = std::fs::read_to_string(csv_path)?;
+    let mut lines = content.lines();
+    // Skip header
+    lines.next();
+    let mut sequences = Vec::new();
+    for line in lines {
+        let fields: Vec<&str> = line.split(',').collect();
+        if fields.is_empty() {
+            continue;
+        }
+        if fields[0] == "SUM" {
+            continue;
+        }
+        let mut sequence = fields[0].as_bytes().to_vec();
+        // Normalize to uppercase
+        for nucleotide in &mut sequence {
+            match nucleotide {
+                b'a' => *nucleotide = b'A',
+                b'c' => *nucleotide = b'C',
+                b'g' => *nucleotide = b'G',
+                b't' => *nucleotide = b'T',
+                _ => {}
+            }
+        }
+        sequences.push(sequence);
+    }
+    Ok(sequences)
 }
 
 /// Parse haplotypes from a CSV file
@@ -628,6 +672,8 @@ struct HaplotypeEstimationProblem {
     recombination_points: usize,
     // Number of recombine/mutate operations per annealing step
     operations_per_step: usize,
+    // True haplotype sequences for debugging (variant positions only)
+    true_haplotype_sequences: Option<Vec<Vec<u8>>>,
 }
 
 impl HaplotypeEstimationProblem {
@@ -647,6 +693,7 @@ impl HaplotypeEstimationProblem {
         nucleotide_frequencies: Vec<[f64; 4]>,
         recombination_points: usize,
         operations_per_step: usize,
+        true_haplotype_sequences: Option<Vec<Vec<u8>>>,
     ) -> Self {
         // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
         let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
@@ -673,6 +720,21 @@ impl HaplotypeEstimationProblem {
             nucleotide_frequencies,
             recombination_points,
             operations_per_step,
+            true_haplotype_sequences,
+        }
+    }
+
+    /// Check if a sequence matches any true haplotype and return matching indices
+    fn check_true_haplotype_match(&self, sequence: &[u8]) -> Vec<usize> {
+        if let Some(ref true_seqs) = self.true_haplotype_sequences {
+            true_seqs
+                .iter()
+                .enumerate()
+                .filter(|(_, true_seq)| *true_seq == sequence)
+                .map(|(idx, _)| idx)
+                .collect()
+        } else {
+            Vec::new()
         }
     }
 
@@ -1448,6 +1510,14 @@ impl HaplotypeEstimationProblem {
             }
             // Add new haplotypes with combined frequencies
             for new_seq in new_sequences {
+                // Check if this matches a true haplotype
+                let matches = self.check_true_haplotype_match(&new_seq);
+                if !matches.is_empty() {
+                    debug!(
+                        "Recombination generated true haplotype(s) at CSV index(es): {:?}",
+                        matches
+                    );
+                }
                 let mut combined_frequencies = vec![0.0; self.samples.len()];
                 for s in 0..self.samples.len() {
                     let freq1 = original_freq1.get(s).unwrap_or(&0.0);
@@ -1505,6 +1575,14 @@ impl HaplotypeEstimationProblem {
             new_sequence[pos_to_change] = new_nucleotide;
             // Only add if this sequence doesn't already exist
             if !haplotypes.iter().any(|h| h.sequence == new_sequence) {
+                // Check if this matches a true haplotype
+                let matches = self.check_true_haplotype_match(&new_sequence);
+                if !matches.is_empty() {
+                    debug!(
+                        "Mutation generated true haplotype(s) at CSV index(es): {:?}",
+                        matches
+                    );
+                }
                 debug!("Adding new mutated haplotype");
                 // Halve the frequencies for the original haplotype
                 for freq in &mut haplotypes[idx_to_copy].frequencies {
@@ -1646,7 +1724,6 @@ impl Anneal for HaplotypeEstimationProblem {
             } else {
                 rand::rngs::StdRng::from_entropy()
             };
-
             // Apply random operations multiple times to "explode" the haplotype set
             let mut operations_applied = 0;
             for op_num in 0..self.operations_per_step {
@@ -1660,7 +1737,6 @@ impl Anneal for HaplotypeEstimationProblem {
                     );
                 }
             }
-
             if operations_applied == 0 {
                 debug!(
                     "No operations could be applied on attempt {}",
@@ -1738,6 +1814,7 @@ fn propose_haplotypes(
         optimization_parameters.nucleotide_frequencies.clone(),
         optimization_parameters.recombination_points,
         optimization_parameters.operations_per_step,
+        optimization_parameters.true_haplotype_sequences.clone(),
     );
     info!(
         "Estimating haplotypes with parameters: samples={}, reads={}, error_rate={}, lambda1={}, lambda2={}, em_max_mismatches={}, em_iterations={}, em_convergence_delta={}, sa_max_temperature={}, sa_iterations={}, sa_reruns={}, original_read_length={}, seed={:?}, recombination_points={}, operations_per_step={}",
@@ -1877,6 +1954,37 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         exit(1);
     }
     let nucleotide_frequencies = compute_nucleotide_frequencies(&variant_only_reads);
+    // Parse true haplotypes if provided and remove invariant positions
+    let true_haplotype_sequences = if let Some(ref csv_path) = args.true_haplotypes_csv {
+        match parse_sequences_from_csv(csv_path) {
+            Ok(sequences) => {
+                let invariant_indices: HashSet<usize> =
+                    invariant_positions.iter().map(|(pos, _)| *pos).collect();
+                let variant_only_sequences: Vec<Vec<u8>> = sequences
+                    .into_iter()
+                    .map(|seq| {
+                        seq.iter()
+                            .enumerate()
+                            .filter(|(i, _)| !invariant_indices.contains(i))
+                            .map(|(_, &b)| b)
+                            .collect()
+                    })
+                    .collect();
+                info!(
+                    "Loaded {} true haplotypes from {} for comparison",
+                    variant_only_sequences.len(),
+                    csv_path
+                );
+                Some(variant_only_sequences)
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to parse true haplotypes CSV: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let optimization_parameters = OptimizationParameters {
         samples: args.files.clone(),
         max_mismatches: args.mismatches,
@@ -1898,6 +2006,7 @@ fn run_estimate(mut args: EstimateArgs) -> Result<()> {
         nucleotide_frequencies,
         recombination_points: args.recombination_points,
         operations_per_step: args.operations_per_step,
+        true_haplotype_sequences,
     };
     let proposed_haplotypes = propose_haplotypes(
         &variant_only_reads,
@@ -1973,6 +2082,7 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
         Vec::new(), // nucleotide_frequencies not used for cost calculation
         0,          // recombination_points not used for cost calculation
         0,          // operations_per_step not used for cost calculation
+        None,       // true_haplotype_sequences not used for cost calculation
     );
     let cost = problem.cost(&variant_only_haplotypes)?;
     println!("Total cost: {}", cost);
@@ -2069,6 +2179,7 @@ mod tests {
             vec![],      // nucleotide_frequencies
             2,           // recombination_points
             3,           // operations_per_step
+            None,        // true_haplotype_sequences
         )
     }
 

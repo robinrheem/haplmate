@@ -1323,12 +1323,20 @@ impl HaplotypeEstimationProblem {
                 attempts += 1;
                 continue;
             }
+            let original_freq1: Vec<f64> = haplotypes[idx1].frequencies.clone();
+            let original_freq2: Vec<f64> = haplotypes[idx2].frequencies.clone();
+            for freq in &mut haplotypes[idx1].frequencies {
+                *freq /= 2.0;
+            }
+            for freq in &mut haplotypes[idx2].frequencies {
+                *freq /= 2.0;
+            }
             for new_seq in new_sequences {
                 let mut combined_frequencies = vec![0.0; self.samples.len()];
                 for s in 0..self.samples.len() {
-                    let freq1 = *haplotypes[idx1].frequencies.get(s).unwrap_or(&0.0);
-                    let freq2 = *haplotypes[idx2].frequencies.get(s).unwrap_or(&0.0);
-                    combined_frequencies[s] = (freq1 + freq2) / 2.0;
+                    let freq1 = original_freq1.get(s).unwrap_or(&0.0);
+                    let freq2 = original_freq2.get(s).unwrap_or(&0.0);
+                    combined_frequencies[s] = (freq1 + freq2) / 4.0;
                 }
                 haplotypes.push(Haplotype {
                     sequence: new_seq,

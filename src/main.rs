@@ -128,6 +128,9 @@ struct CostArgs {
 struct Read {
     sequence: Vec<u8>,
     sample: String,
+    /// Pre-computed mask: 1 where the read has a non-gap nucleotide, 0 at gap positions.
+    /// This avoids re-checking `r != b'-'` for every haplotype comparison.
+    non_gap_mask: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -326,9 +329,14 @@ fn remove_invariants(reads: &Vec<Read>) -> (Vec<Read>, Vec<(usize, u8)>) {
     let filtered_reads = reads
         .iter()
         .enumerate()
-        .map(|(i, read)| Read {
-            sequence: filtered_sequences[i].clone(),
-            sample: read.sample.clone(),
+        .map(|(i, read)| {
+            let seq = filtered_sequences[i].clone();
+            let non_gap_mask = seq.iter().map(|&b| u8::from(b != b'-')).collect();
+            Read {
+                sequence: seq,
+                sample: read.sample.clone(),
+                non_gap_mask,
+            }
         })
         .collect();
 
@@ -365,9 +373,11 @@ fn extract_reads<'a>(samples: &'a [String]) -> Vec<Read> {
                         _ => {} // Leave other characters unchanged (gaps, N, etc.)
                     }
                 }
+                let non_gap_mask = sequence.iter().map(|&b| u8::from(b != b'-')).collect();
                 reads.push(Read {
                     sequence,
                     sample: sample.to_string(),
+                    non_gap_mask,
                 });
             });
     });
@@ -738,30 +748,32 @@ impl HaplotypeEstimationProblem {
         }
     }
 
-    /// Looks up the pre-computed probability for a given mismatch count.
-    #[inline]
-    fn mismatch_probability(&self, mismatches: usize) -> f64 {
-        if mismatches > self.em_max_mismatches {
-            return 0.0;
-        }
-        self.mismatch_prob_table[mismatches]
-    }
-
     /// Calculate mismatch probability between a read and haplotype.
-    /// Optimized with early stopping when mismatches exceed threshold.
+    ///
+    /// Uses a branchless inner loop that the compiler can auto-vectorize with SIMD.
+    /// The gap check is eliminated by using the pre-computed `non_gap_mask` on each Read
+    /// (1 at non-gap positions, 0 at gaps). This avoids redundant work when comparing
+    /// the same read against many haplotypes.
+    #[inline]
     fn compute_mismatch_probability(&self, read: &Read, haplotype: &Haplotype) -> f64 {
-        // Early stopping optimization: stop counting when we exceed max_mismatches
-        let mut mismatches = 0;
-        for (&r, &h) in read.sequence.iter().zip(&haplotype.sequence) {
-            if r != h && r != b'-' {
-                mismatches += 1;
-                // Early exit if we've already exceeded the threshold
-                if mismatches > self.em_max_mismatches {
-                    return 0.0;
-                }
-            }
+        let len = read.sequence.len();
+        let rs = &read.sequence[..len];
+        let hs = &haplotype.sequence[..len];
+        let mask = &read.non_gap_mask[..len];
+
+        // Branchless mismatch count — no early exit so the compiler can emit SIMD.
+        // Each iteration: (rs[i] != hs[i]) as u32  &  mask[i] as u32
+        // With -C target-cpu=native this compiles to vectorized pcmpeqb + pand.
+        let mut mismatches: u32 = 0;
+        for i in 0..len {
+            mismatches += (rs[i] != hs[i]) as u32 & mask[i] as u32;
         }
-        self.mismatch_probability(mismatches)
+
+        if mismatches as usize > self.em_max_mismatches {
+            0.0
+        } else {
+            self.mismatch_prob_table[mismatches as usize]
+        }
     }
 
     /// Pre-compute mismatch probability matrix for all reads against all haplotypes.
@@ -2275,9 +2287,11 @@ mod tests {
                         _ => {}
                     }
                 }
+                let non_gap_mask = sequence.iter().map(|&b| u8::from(b != b'-')).collect();
                 Read {
                     sequence,
                     sample: sample.to_string(),
+                    non_gap_mask,
                 }
             })
             .collect()
@@ -2436,10 +2450,12 @@ mod tests {
         reads.push(Read {
             sequence: b"ACGT".to_vec(),
             sample: "sample1".to_string(),
+            non_gap_mask: vec![1; 4],
         });
         reads.push(Read {
             sequence: b"ACG".to_vec(),
             sample: "sample1".to_string(),
+            non_gap_mask: vec![1; 3],
         });
 
         remove_invariants(&reads);
@@ -2451,10 +2467,12 @@ mod tests {
             Read {
                 sequence: b"ACGT".to_vec(),
                 sample: "sample_A".to_string(),
+                non_gap_mask: vec![1; 4],
             },
             Read {
                 sequence: b"AGGT".to_vec(),
                 sample: "sample_B".to_string(),
+                non_gap_mask: vec![1; 4],
             },
         ];
         let result = remove_invariants(&reads);
@@ -2572,10 +2590,12 @@ mod tests {
             Read {
                 sequence: b"A-C".to_vec(),
                 sample: "sample1".to_string(),
+                non_gap_mask: vec![1, 0, 1],
             },
             Read {
                 sequence: b"T-G".to_vec(),
                 sample: "sample2".to_string(),
+                non_gap_mask: vec![1, 0, 1],
             },
         ];
         let haplotypes =

@@ -1536,73 +1536,132 @@ impl HaplotypeEstimationProblem {
         }
     }
     /// Applies mutation operation to create a new haplotype
-    /// Uses MAF distribution to sample the new nucleotide at each position
+    /// Mutates a haplotype using distribution-guided nucleotide sampling.
+    ///
+    /// First picks a random position. At that position, compares the nucleotide
+    /// distribution of the proposed haplotypes against the reads nucleotide distribution.
+    /// Picks a random haplotype that carries the most overrepresented nucleotide and
+    /// replaces it with the most underrepresented nucleotide. Retries with a new random
+    /// position until a unique new haplotype is produced.
     fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
-        let idx_to_copy = rng.gen_range(0..haplotypes.len());
-        let mut attempts = 0;
-        const MAX_ATTEMPTS: usize = 100;
+        let seq_len = haplotypes[0].sequence.len();
+        let nucleotides = [b'A', b'C', b'G', b'T'];
         let existing_sequences: AHashSet<&[u8]> =
             haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
-        loop {
-            if attempts >= MAX_ATTEMPTS {
-                debug!(
-                    "Failed to generate unique mutated haplotype after {} attempts",
-                    MAX_ATTEMPTS
-                );
-                break;
+        const MAX_ATTEMPTS: usize = 100;
+        for _attempt in 0..MAX_ATTEMPTS {
+            // Step 1: Pick a random position.
+            let pos = rng.gen_range(0..seq_len);
+            // Step 2: Compute nucleotide distribution at this position from the proposed haplotypes.
+            let mut hap_counts = [0.0f64; 4];
+            for hap in haplotypes.iter() {
+                match hap.sequence[pos] {
+                    b'A' => hap_counts[0] += 1.0,
+                    b'C' => hap_counts[1] += 1.0,
+                    b'G' => hap_counts[2] += 1.0,
+                    b'T' => hap_counts[3] += 1.0,
+                    _ => {}
+                }
             }
+            let num_haplotypes = haplotypes.len() as f64;
+            let hap_freqs: [f64; 4] = [
+                hap_counts[0] / num_haplotypes,
+                hap_counts[1] / num_haplotypes,
+                hap_counts[2] / num_haplotypes,
+                hap_counts[3] / num_haplotypes,
+            ];
+            // Step 3: Compare with reads distribution at this position.
+            // Find the most overestimated nucleotide (haplotypes have more than reads).
+            let reads_freqs = &self.nucleotide_frequencies[pos];
+            let overestimates: [f64; 4] = [
+                hap_freqs[0] - reads_freqs[0],
+                hap_freqs[1] - reads_freqs[1],
+                hap_freqs[2] - reads_freqs[2],
+                hap_freqs[3] - reads_freqs[3],
+            ];
+            let over_nuc_idx = overestimates
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(idx, _)| idx)
+                .unwrap();
+            let over_nuc = nucleotides[over_nuc_idx];
+            // Step 4: Find the most underestimated nucleotide at this position
+            // (reads have more than haplotypes, excluding the overestimated nucleotide).
+            let underestimates: [f64; 4] = [
+                reads_freqs[0] - hap_freqs[0],
+                reads_freqs[1] - hap_freqs[1],
+                reads_freqs[2] - hap_freqs[2],
+                reads_freqs[3] - hap_freqs[3],
+            ];
+            let under_nuc_idx = underestimates
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| *idx != over_nuc_idx)
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(idx, _)| idx)
+                .unwrap();
+            let under_nuc = nucleotides[under_nuc_idx];
+            // Step 5: Pick a random haplotype that carries the overestimated nucleotide at this position.
+            let candidates: Vec<usize> = (0..haplotypes.len())
+                .filter(|&i| haplotypes[i].sequence[pos] == over_nuc)
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            let idx_to_copy = candidates[rng.gen_range(0..candidates.len())];
             let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
-            let pos_to_change = rng.gen_range(0..new_sequence.len());
-            // Sample nucleotide based on MAF distribution at this position
-            let new_nucleotide = if pos_to_change < self.nucleotide_frequencies.len() {
-                let freqs = &self.nucleotide_frequencies[pos_to_change];
+            // Try the distribution-guided nucleotide first; if it produces a duplicate,
+            // fall back to sampling from the reads distribution at this position.
+            new_sequence[pos] = under_nuc;
+            if existing_sequences.contains(new_sequence.as_slice()) {
+                trace!(
+                    "Distribution-guided mutation at pos {} ({} -> {}) produced duplicate, falling back to reads distribution sampling",
+                    pos,
+                    over_nuc as char,
+                    under_nuc as char
+                );
+                // Sample nucleotide from reads distribution at this position
                 let r: f64 = rng.gen();
-                if r < freqs[0] {
+                let new_nucleotide = if r < reads_freqs[0] {
                     b'A'
-                } else if r < freqs[0] + freqs[1] {
+                } else if r < reads_freqs[0] + reads_freqs[1] {
                     b'C'
-                } else if r < freqs[0] + freqs[1] + freqs[2] {
+                } else if r < reads_freqs[0] + reads_freqs[1] + reads_freqs[2] {
                     b'G'
                 } else {
                     b'T'
+                };
+                new_sequence[pos] = new_nucleotide;
+                if existing_sequences.contains(new_sequence.as_slice()) {
+                    continue;
                 }
-            } else {
-                // Fallback to uniform if position out of range
-                [b'A', b'C', b'G', b'T'][rng.gen_range(0..4)]
-            };
-            trace!(
-                "Mutating haplotype {} at position {} to {} (attempt {})",
-                idx_to_copy,
-                pos_to_change,
-                new_nucleotide as char,
-                attempts + 1
-            );
-            new_sequence[pos_to_change] = new_nucleotide;
-            if !existing_sequences.contains(new_sequence.as_slice()) {
-                // Check if this matches a true haplotype
-                let matches = self.check_true_haplotype_match(&new_sequence);
-                if !matches.is_empty() {
-                    debug!(
-                        "Mutation generated true haplotype(s) at CSV index(es): {:?}",
-                        matches
-                    );
-                }
-                debug!("Adding new mutated haplotype");
-                // Halve the frequencies for the original haplotype
-                for freq in &mut haplotypes[idx_to_copy].frequencies {
-                    *freq /= 2.0;
-                }
-                let new_freqs = haplotypes[idx_to_copy].frequencies.clone();
-                haplotypes.push(Haplotype {
-                    sequence: new_sequence,
-                    frequencies: new_freqs,
-                });
-                break;
-            } else {
-                trace!("Mutated sequence already exists, trying again");
-                attempts += 1;
             }
+            let matches = self.check_true_haplotype_match(&new_sequence);
+            if !matches.is_empty() {
+                debug!(
+                    "Mutation generated true haplotype(s) at CSV index(es): {:?}",
+                    matches
+                );
+            }
+            debug!(
+                "Adding mutated haplotype (pos {} {} -> {})",
+                pos, over_nuc as char, new_sequence[pos] as char
+            );
+            for freq in &mut haplotypes[idx_to_copy].frequencies {
+                *freq /= 2.0;
+            }
+            let new_freqs = haplotypes[idx_to_copy].frequencies.clone();
+            haplotypes.push(Haplotype {
+                sequence: new_sequence,
+                frequencies: new_freqs,
+            });
+            return;
         }
+        debug!(
+            "Failed to generate unique mutated haplotype after {} attempts",
+            MAX_ATTEMPTS
+        );
     }
 }
 

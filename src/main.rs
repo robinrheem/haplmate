@@ -1220,22 +1220,6 @@ impl HaplotypeEstimationProblem {
                 indices_to_remove.push(hap_idx);
             }
         }
-        // Log haplotypes being removed
-        for &idx in &indices_to_remove {
-            let haplotype = &haplotypes[idx];
-            let freq_str: Vec<String> = self
-                .samples
-                .iter()
-                .enumerate()
-                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
-                .collect();
-            trace!(
-                "Removing haplotype {}: sequence={}, frequencies=[{}]",
-                idx,
-                String::from_utf8_lossy(&haplotype.sequence),
-                freq_str.join(", ")
-            );
-        }
         // Remove haplotypes in reverse order to maintain correct indices
         for &idx in indices_to_remove.iter().rev() {
             haplotypes.remove(idx);
@@ -1607,31 +1591,15 @@ impl HaplotypeEstimationProblem {
             }
             let idx_to_copy = candidates[rng.gen_range(0..candidates.len())];
             let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
-            // Try the distribution-guided nucleotide first; if it produces a duplicate,
-            // fall back to sampling from the reads distribution at this position.
             new_sequence[pos] = under_nuc;
             if existing_sequences.contains(new_sequence.as_slice()) {
                 trace!(
-                    "Distribution-guided mutation at pos {} ({} -> {}) produced duplicate, falling back to reads distribution sampling",
+                    "Distribution-guided mutation at pos {} ({} -> {}) produced duplicate, skipping",
                     pos,
                     over_nuc as char,
                     under_nuc as char
                 );
-                // Sample nucleotide from reads distribution at this position
-                let r: f64 = rng.gen();
-                let new_nucleotide = if r < reads_freqs[0] {
-                    b'A'
-                } else if r < reads_freqs[0] + reads_freqs[1] {
-                    b'C'
-                } else if r < reads_freqs[0] + reads_freqs[1] + reads_freqs[2] {
-                    b'G'
-                } else {
-                    b'T'
-                };
-                new_sequence[pos] = new_nucleotide;
-                if existing_sequences.contains(new_sequence.as_slice()) {
-                    continue;
-                }
+                continue;
             }
             let matches = self.check_true_haplotype_match(&new_sequence);
             if !matches.is_empty() {

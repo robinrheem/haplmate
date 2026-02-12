@@ -1060,22 +1060,6 @@ impl HaplotypeEstimationProblem {
                 indices_to_remove.push(hap_idx);
             }
         }
-        // Log haplotypes being removed
-        for &idx in &indices_to_remove {
-            let haplotype = &haplotypes[idx];
-            let freq_str: Vec<String> = self
-                .samples
-                .iter()
-                .enumerate()
-                .map(|(s_idx, sample)| format!("{}:{:.6}", sample, haplotype.frequencies[s_idx]))
-                .collect();
-            trace!(
-                "Removing haplotype {}: sequence={}, frequencies=[{}]",
-                idx,
-                String::from_utf8_lossy(&haplotype.sequence),
-                freq_str.join(", ")
-            );
-        }
         // Remove haplotypes in reverse order to maintain correct indices
         for &idx in indices_to_remove.iter().rev() {
             haplotypes.remove(idx);

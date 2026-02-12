@@ -1999,6 +1999,18 @@ fn propose_haplotypes(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()
     );
+    if let Err(e) =
+        problem.square_expectation_maximization(&mut merged_haplotypes, convergence_delta)
+    {
+        info!(
+            "EM optimization failed: {}, proceeding with unoptimized haplotypes",
+            e
+        );
+    }
+    info!(
+        "EM optimization completed. {} haplotypes remain",
+        merged_haplotypes.len()
+    );
     let final_rng = if let Some(seed) = optimization_parameters.seed {
         rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(sa_reruns as u64))
     } else {

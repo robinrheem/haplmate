@@ -95,6 +95,10 @@ categories <- c(
     rep("estimated_not_true", length(estimated_not_true))
 )
 
+# For true haplotypes, keep the original 0-based row index from true CSV
+# (first occurrence if a sequence appears multiple times).
+true_seq_csv_index <- match(all_seqs, true_seqs) - 1
+
 if (length(all_seqs) == 0) {
     cat("Error: No haplotypes found!\n")
     quit(status = 1)
@@ -152,7 +156,20 @@ hap_freqs <- sapply(seq_len(n_haps), function(i) {
     combined_freqs[first_seq_idx]
 })
 
+hap_true_csv_indices <- sapply(seq_len(n_haps), function(i) {
+    first_seq_idx <- hap_indices[[i]][1]
+    true_seq_csv_index[first_seq_idx]
+})
+
 node_colors <- color_map[hap_categories]
+
+# Choose a high-contrast text color based on node fill color.
+get_contrast_text_color <- function(fill_color) {
+    rgb_vals <- col2rgb(fill_color) / 255
+    # Relative luminance approximation; lower means darker background.
+    luminance <- 0.2126 * rgb_vals[1] + 0.7152 * rgb_vals[2] + 0.0722 * rgb_vals[3]
+    if (luminance < 0.5) "#ffffff" else "#111111"
+}
 
 # Create haplotype network
 net <- haploNet(h)
@@ -379,6 +396,15 @@ draw_network <- function(output_file, title_suffix, show_non_mst, non_mst_to_dra
                 bg = node_colors[i], fg = "#333333", lwd = 2)
     }
 
+    # Draw node labels for true haplotypes: original row index in true CSV.
+    for (i in seq_len(n_haps)) {
+        if (hap_categories[i] != "estimated_not_true" && !is.na(hap_true_csv_indices[i])) {
+            label_color <- get_contrast_text_color(node_colors[i])
+            text(xy$x[i], xy$y[i], labels = as.character(hap_true_csv_indices[i]),
+                 cex = 0.72, col = label_color, font = 2)
+        }
+    }
+
     # Draw MST mutation labels
     for (i in seq_len(n_mst_edges)) {
         from_idx <- mst_edges[i, 1]
@@ -436,13 +462,15 @@ draw_network <- function(output_file, title_suffix, show_non_mst, non_mst_to_dra
                         "MST edge (thick solid)",
                         "Other edge (thin dotted)",
                         "",
+                        "Node label (true only) = true CSV index",
+                        "",
                         "Circle size = frequency",
                         "Numbers = mutations")
-        legend_pch <- c(21, 21, 21, NA, NA, NA, NA, NA, NA)
-        legend_pt_bg <- c("#1a3a5c", "#5b9aa0", "#e8b923", NA, NA, NA, NA, NA, NA)
-        legend_lty <- c(NA, NA, NA, NA, 1, 2, NA, NA, NA)
-        legend_lwd <- c(NA, NA, NA, NA, 3, 1, NA, NA, NA)
-        legend_col <- c("black", "black", "black", NA, "#2c2c2c", "#aaaaaa", NA, NA, NA)
+        legend_pch <- c(21, 21, 21, NA, NA, NA, NA, NA, NA, NA)
+        legend_pt_bg <- c("#1a3a5c", "#5b9aa0", "#e8b923", NA, NA, NA, NA, NA, NA, NA)
+        legend_lty <- c(NA, NA, NA, NA, 1, 2, NA, NA, NA, NA)
+        legend_lwd <- c(NA, NA, NA, NA, 3, 1, NA, NA, NA, NA)
+        legend_col <- c("black", "black", "black", NA, "#2c2c2c", "#aaaaaa", NA, NA, NA, NA)
     } else {
         legend_text <- c("Estimated True Haplotype",
                         "Not Estimated True Haplotype",
@@ -450,13 +478,15 @@ draw_network <- function(output_file, title_suffix, show_non_mst, non_mst_to_dra
                         "",
                         "MST edge",
                         "",
+                        "Node label (true only) = true CSV index",
+                        "",
                         "Circle size = frequency",
                         "Numbers = mutations")
-        legend_pch <- c(21, 21, 21, NA, NA, NA, NA, NA)
-        legend_pt_bg <- c("#1a3a5c", "#5b9aa0", "#e8b923", NA, NA, NA, NA, NA)
-        legend_lty <- c(NA, NA, NA, NA, 1, NA, NA, NA)
-        legend_lwd <- c(NA, NA, NA, NA, 3, NA, NA, NA)
-        legend_col <- c("black", "black", "black", NA, "#2c2c2c", NA, NA, NA)
+        legend_pch <- c(21, 21, 21, NA, NA, NA, NA, NA, NA, NA)
+        legend_pt_bg <- c("#1a3a5c", "#5b9aa0", "#e8b923", NA, NA, NA, NA, NA, NA, NA)
+        legend_lty <- c(NA, NA, NA, NA, 1, NA, NA, NA, NA, NA)
+        legend_lwd <- c(NA, NA, NA, NA, 3, NA, NA, NA, NA, NA)
+        legend_col <- c("black", "black", "black", NA, "#2c2c2c", NA, NA, NA, NA, NA)
     }
 
     legend("right",

@@ -1,4 +1,4 @@
-use ahash::AHashSet;
+use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
@@ -1897,19 +1897,6 @@ fn propose_haplotypes(
         optimization_parameters.recombination_points,
         optimization_parameters.operations_per_step
     );
-    let rng = if let Some(seed) = optimization_parameters.seed {
-        rand::rngs::StdRng::seed_from_u64(seed)
-    } else {
-        rand::rngs::StdRng::from_entropy()
-    };
-    let solver = SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, rng)
-        .unwrap()
-        .with_temp_func(SATempFunc::Boltzmann)
-        .with_reannealing_fixed(optimization_parameters.sa_reannealing_fixed)
-        .with_reannealing_accepted(optimization_parameters.sa_reannealing_accepted)
-        .with_reannealing_best(optimization_parameters.sa_reannealing_best)
-        .with_stall_accepted(optimization_parameters.sa_stall_accepted)
-        .with_stall_best(optimization_parameters.sa_stall_best);
     // Optimize initial haplotypes with EM before starting SA
     let mut best_haplotypes = initial_haplotypes.clone();
     info!(
@@ -1932,33 +1919,127 @@ fn propose_haplotypes(
         "EM optimization completed. {} haplotypes remain",
         best_haplotypes.len()
     );
-    let mut best_objective = f64::INFINITY;
-    let mut best_likelihood = f64::INFINITY;
-    for i in 0..optimization_parameters.sa_reruns {
-        info!(
-            "Running SA with {} haplotypes, iteration {}",
-            best_haplotypes.len(),
-            i
-        );
-        let result = Executor::new(problem.clone(), solver.clone())
-            .configure(|state| state.param(best_haplotypes.clone()))
-            .run()
-            .unwrap();
-        let best_cost = result.state().best_cost;
-        if best_cost < best_objective {
-            if let Some(ref param) = result.state().best_param {
-                best_haplotypes = param.clone();
-                best_objective = best_cost;
-                info!("New best haplotypes: {}", best_haplotypes.len());
-                info!("New best objective: {}", best_objective);
+    let sa_reruns = optimization_parameters.sa_reruns;
+    let num_samples = optimization_parameters.samples.len();
+    let results: Vec<Vec<Haplotype>> = (0..sa_reruns)
+        .into_par_iter()
+        .map(|i| {
+            info!(
+                "Running SA with {} haplotypes, parallel run {}/{}",
+                best_haplotypes.len(),
+                i + 1,
+                sa_reruns
+            );
+            let run_rng = if let Some(seed) = optimization_parameters.seed {
+                rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(i as u64))
+            } else {
+                rand::rngs::StdRng::from_entropy()
+            };
+            let run_solver = SimulatedAnnealing::new_with_rng(
+                optimization_parameters.sa_max_temperature,
+                run_rng,
+            )
+            .unwrap()
+            .with_temp_func(SATempFunc::Boltzmann)
+            .with_reannealing_fixed(optimization_parameters.sa_reannealing_fixed)
+            .with_reannealing_accepted(optimization_parameters.sa_reannealing_accepted)
+            .with_reannealing_best(optimization_parameters.sa_reannealing_best)
+            .with_stall_accepted(optimization_parameters.sa_stall_accepted)
+            .with_stall_best(optimization_parameters.sa_stall_best);
+            let mut run_problem = problem.clone();
+            if let Some(seed) = optimization_parameters.seed {
+                run_problem.seed = Some(seed.wrapping_add(i as u64 * 1000));
+            }
+            let result = Executor::new(run_problem, run_solver)
+                .configure(|state| state.param(best_haplotypes.clone()))
+                .run()
+                .unwrap();
+            let best_cost = result.state().best_cost;
+            info!(
+                "Parallel run {}/{} complete, cost: {}",
+                i + 1,
+                sa_reruns,
+                best_cost
+            );
+            result
+                .state()
+                .best_param
+                .clone()
+                .unwrap_or_else(|| best_haplotypes.clone())
+        })
+        .collect();
+    let mut merged: AHashMap<Vec<u8>, Vec<f64>> = AHashMap::new();
+    for run_haplotypes in &results {
+        for hap in run_haplotypes {
+            let entry = merged
+                .entry(hap.sequence.clone())
+                .or_insert_with(|| vec![0.0; num_samples]);
+            for (j, freq) in hap.frequencies.iter().enumerate() {
+                entry[j] += freq;
             }
         }
-        // Track best likelihood across all runs
-        if best_cost < best_likelihood {
-            best_likelihood = best_cost;
-            info!("New global best likelihood: {}", best_likelihood);
+    }
+    let mut merged_haplotypes: Vec<Haplotype> = merged
+        .into_iter()
+        .map(|(seq, freqs)| Haplotype {
+            sequence: seq,
+            frequencies: freqs,
+        })
+        .collect();
+    let sample_sums: Vec<f64> = (0..num_samples)
+        .map(|s| {
+            merged_haplotypes
+                .iter()
+                .map(|h| h.frequencies[s])
+                .sum::<f64>()
+        })
+        .collect();
+    for hap in &mut merged_haplotypes {
+        for (s, freq) in hap.frequencies.iter_mut().enumerate() {
+            if sample_sums[s] > 0.0 {
+                *freq /= sample_sums[s];
+            }
         }
     }
+    info!(
+        "Merged {} total haplotypes from {} parallel runs into {} unique haplotypes",
+        results.iter().map(|r| r.len()).sum::<usize>(),
+        sa_reruns,
+        merged_haplotypes.len()
+    );
+    info!(
+        "Running final SA pass on {} merged haplotypes",
+        merged_haplotypes.len()
+    );
+    let final_rng = if let Some(seed) = optimization_parameters.seed {
+        rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(sa_reruns as u64))
+    } else {
+        rand::rngs::StdRng::from_entropy()
+    };
+    let final_solver =
+        SimulatedAnnealing::new_with_rng(optimization_parameters.sa_max_temperature, final_rng)
+            .unwrap()
+            .with_temp_func(SATempFunc::Boltzmann)
+            .with_reannealing_fixed(optimization_parameters.sa_reannealing_fixed)
+            .with_reannealing_accepted(optimization_parameters.sa_reannealing_accepted)
+            .with_reannealing_best(optimization_parameters.sa_reannealing_best)
+            .with_stall_accepted(optimization_parameters.sa_stall_accepted)
+            .with_stall_best(optimization_parameters.sa_stall_best);
+    let final_result = Executor::new(problem.clone(), final_solver)
+        .configure(|state| state.param(merged_haplotypes.clone()))
+        .run()
+        .unwrap();
+    best_haplotypes = if let Some(ref param) = final_result.state().best_param {
+        info!(
+            "Final SA pass complete, {} haplotypes with cost {}",
+            param.len(),
+            final_result.state().best_cost
+        );
+        param.clone()
+    } else {
+        info!("Final SA pass produced no result, keeping merged haplotypes");
+        merged_haplotypes
+    };
     best_haplotypes
 }
 

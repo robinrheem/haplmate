@@ -1936,12 +1936,8 @@ fn propose_haplotypes(
     let results: Vec<Vec<Haplotype>> = (0..sa_reruns)
         .into_par_iter()
         .map(|i| {
-            info!(
-                "Running SA with {} haplotypes, parallel run {}/{}",
-                best_haplotypes.len(),
-                i + 1,
-                sa_reruns
-            );
+            let _span = tracing::info_span!("sa_run", run = i + 1, of = sa_reruns).entered();
+            info!("Running SA with {} haplotypes", best_haplotypes.len(),);
             let run_rng = if let Some(seed) = optimization_parameters.seed {
                 rand::rngs::StdRng::seed_from_u64(seed.wrapping_add(i as u64))
             } else {
@@ -1967,12 +1963,7 @@ fn propose_haplotypes(
                 .run()
                 .unwrap();
             let best_cost = result.state().best_cost;
-            info!(
-                "Parallel run {}/{} complete, cost: {}",
-                i + 1,
-                sa_reruns,
-                best_cost
-            );
+            info!("SA run complete, cost: {}", best_cost);
             result
                 .state()
                 .best_param
@@ -2019,6 +2010,7 @@ fn propose_haplotypes(
         sa_reruns,
         merged_haplotypes.len()
     );
+    let _final_span = tracing::info_span!("sa_final").entered();
     info!(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()

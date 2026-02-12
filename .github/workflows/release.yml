@@ -19,26 +19,31 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             ext: tar.gz
+            cpu: x86-64-v3
 
           # Linux x86_64 (musl, static-ish)
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             ext: tar.gz
+            cpu: x86-64-v3
 
           # macOS Intel
           - os: macos-15
             target: x86_64-apple-darwin
             ext: tar.gz
+            cpu: x86-64-v3
 
           # macOS Apple Silicon
           - os: macos-14
             target: aarch64-apple-darwin
             ext: tar.gz
+            cpu: native
 
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             ext: zip
+            cpu: x86-64-v3
 
     runs-on: ${{ matrix.os }}
 
@@ -57,6 +62,8 @@ jobs:
           sudo apt-get install -y musl-tools
 
       - name: Build
+        env:
+          RUSTFLAGS: "-C target-cpu=${{ matrix.cpu }}"
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Package (Unix)

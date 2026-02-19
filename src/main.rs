@@ -1137,8 +1137,9 @@ impl HaplotypeEstimationProblem {
                 // Hoist memberships allocation to avoid re-allocation in every EM iteration
                 let mut memberships = vec![vec![0.0; num_haps]; num_reads];
                 // Main EM loop
+                let mut theta_old = vec![0.0; num_haps];
                 while iters < self.em_iterations {
-                    let theta_old = theta.clone();
+                    theta_old.copy_from_slice(&theta);
                     // E-step: Calculate memberships (normalized probabilities)
                     for i in 0..num_reads {
                         let denom: f64 = mismatch_fp_new[i].iter().sum();

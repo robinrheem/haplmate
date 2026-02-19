@@ -2,6 +2,7 @@ use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
 use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
+use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
@@ -1528,10 +1529,37 @@ impl HaplotypeEstimationProblem {
         let nucleotides = [b'A', b'C', b'G', b'T'];
         let existing_sequences: AHashSet<&[u8]> =
             haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
+        // Compute distance-based weights for position selection.
+        // δ_i = Σ_j (E_ij - O_ij)² where E = haplotype freq, O = read freq
+        let num_haplotypes_f = haplotypes.len() as f64;
+        let position_weights: Vec<f64> = (0..seq_len)
+            .map(|pos| {
+                let mut hap_counts = [0.0f64; 4];
+                for hap in haplotypes.iter() {
+                    match hap.sequence[pos] {
+                        b'A' => hap_counts[0] += 1.0,
+                        b'C' => hap_counts[1] += 1.0,
+                        b'G' => hap_counts[2] += 1.0,
+                        b'T' => hap_counts[3] += 1.0,
+                        _ => {}
+                    }
+                }
+                let reads_freqs = &self.nucleotide_frequencies[pos];
+                (0..4)
+                    .map(|j| {
+                        let hap_freq = hap_counts[j] / num_haplotypes_f;
+                        (hap_freq - reads_freqs[j]).powi(2)
+                    })
+                    .sum::<f64>()
+            })
+            .collect();
+        // Create weighted distribution; fall back to uniform if all weights are zero
+        let pos_dist = WeightedIndex::new(&position_weights)
+            .unwrap_or_else(|_| WeightedIndex::new(&vec![1.0; seq_len]).unwrap());
         const MAX_ATTEMPTS: usize = 100;
         for _attempt in 0..MAX_ATTEMPTS {
-            // Step 1: Pick a random position.
-            let pos = rng.gen_range(0..seq_len);
+            // Step 1: Pick a position weighted by per-position squared error distance.
+            let pos = pos_dist.sample(rng);
             // Step 2: Compute nucleotide distribution at this position from the proposed haplotypes.
             let mut hap_counts = [0.0f64; 4];
             for hap in haplotypes.iter() {

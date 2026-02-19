@@ -1062,9 +1062,7 @@ impl HaplotypeEstimationProblem {
             }
         }
         // Remove haplotypes in reverse order to maintain correct indices
-        for &idx in indices_to_remove.iter().rev() {
-            haplotypes.remove(idx);
-        }
+        haplotypes.retain(|h| h.frequencies.iter().any(|&f| !f.is_nan() && f >= 0.005));
         // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
         for sample_idx in 0..self.samples.len() {
             let mut sum = 0.0;
@@ -1221,10 +1219,7 @@ impl HaplotypeEstimationProblem {
                 indices_to_remove.push(hap_idx);
             }
         }
-        // Remove haplotypes in reverse order to maintain correct indices
-        for &idx in indices_to_remove.iter().rev() {
-            haplotypes.remove(idx);
-        }
+        haplotypes.retain(|h| h.frequencies.iter().any(|&f| !f.is_nan() && f >= 0.005));
         // Rescale frequencies to sum to 1.0 for each sample (like rescaleAlleleFrequencies in C)
         for sample_idx in 0..self.samples.len() {
             let mut sum = 0.0;

@@ -687,6 +687,85 @@ struct HaplotypeEstimationProblem {
     true_haplotype_sequences: Option<Vec<Vec<u8>>>,
 }
 
+#[inline]
+fn nuc_to_idx(nuc: u8) -> Option<usize> {
+    match nuc {
+        b'A' => Some(0),
+        b'C' => Some(1),
+        b'G' => Some(2),
+        b'T' => Some(3),
+        _ => None,
+    }
+}
+
+/// Tracks haplotype set membership and per-position nucleotide counts
+/// so that `mutate` and `recombine` can avoid O(h × L) rebuilds each call.
+struct AnnealingState {
+    existing_sequences: AHashSet<Vec<u8>>,
+    per_pos_hap_counts: Vec<[u32; 4]>,
+    num_haplotypes: u32,
+}
+
+impl AnnealingState {
+    fn from_haplotypes(haplotypes: &[Haplotype]) -> Self {
+        let seq_len = haplotypes.first().map_or(0, |h| h.sequence.len());
+        let mut per_pos_hap_counts = vec![[0u32; 4]; seq_len];
+        let mut existing_sequences = AHashSet::with_capacity(haplotypes.len() * 2);
+
+        for hap in haplotypes {
+            existing_sequences.insert(hap.sequence.clone());
+            for (pos, &nuc) in hap.sequence.iter().enumerate() {
+                if let Some(idx) = nuc_to_idx(nuc) {
+                    per_pos_hap_counts[pos][idx] += 1;
+                }
+            }
+        }
+
+        Self {
+            existing_sequences,
+            per_pos_hap_counts,
+            num_haplotypes: haplotypes.len() as u32,
+        }
+    }
+
+    fn add_haplotype(&mut self, sequence: &[u8]) {
+        self.existing_sequences.insert(sequence.to_vec());
+        for (pos, &nuc) in sequence.iter().enumerate() {
+            if let Some(idx) = nuc_to_idx(nuc) {
+                self.per_pos_hap_counts[pos][idx] += 1;
+            }
+        }
+        self.num_haplotypes += 1;
+    }
+
+    #[inline]
+    fn contains(&self, sequence: &[u8]) -> bool {
+        self.existing_sequences.contains(sequence)
+    }
+
+    #[inline]
+    fn hap_counts_at(&self, pos: usize) -> [f64; 4] {
+        let c = &self.per_pos_hap_counts[pos];
+        [c[0] as f64, c[1] as f64, c[2] as f64, c[3] as f64]
+    }
+
+    fn compute_position_weights(&self, nucleotide_frequencies: &[[f64; 4]]) -> Vec<f64> {
+        let n = self.num_haplotypes as f64;
+        self.per_pos_hap_counts
+            .iter()
+            .zip(nucleotide_frequencies.iter())
+            .map(|(counts, reads_freqs)| {
+                (0..4)
+                    .map(|j| {
+                        let hap_freq = counts[j] as f64 / n;
+                        (hap_freq - reads_freqs[j]).powi(2)
+                    })
+                    .sum::<f64>()
+            })
+            .collect()
+    }
+}
+
 impl HaplotypeEstimationProblem {
     fn new(
         samples: Vec<String>,
@@ -1388,25 +1467,27 @@ impl HaplotypeEstimationProblem {
     ///
     /// # Returns
     /// Whether an operation was successfully applied
-    fn random_operation(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) -> bool {
-        // Determine which operation to perform based on current state
+    fn random_operation(
+        &self,
+        haplotypes: &mut Vec<Haplotype>,
+        rng: &mut impl Rng,
+        state: &mut AnnealingState,
+    ) -> bool {
         let operation: i32 = if haplotypes.len() == 1 {
             debug!("Only one haplotype present, forcing add operation");
-            1 // Force add operation for single haplotype
+            1
         } else {
             rng.gen_range(0..2)
         };
         match operation {
             0 if haplotypes.len() >= 2 => {
-                // Recombine two random haplotypes
                 debug!("Operation: Recombine");
-                self.recombine(haplotypes, rng);
+                self.recombine(haplotypes, rng, state);
                 true
             }
             1 if haplotypes.len() < self.reads.len() => {
-                // Add a new haplotype by mutating an existing one
                 debug!("Operation: Add new haplotype by mutation");
-                self.mutate(haplotypes, rng);
+                self.mutate(haplotypes, rng, state);
                 true
             }
             _ => {
@@ -1431,13 +1512,17 @@ impl HaplotypeEstimationProblem {
     /// - Parent 1 provides: a1, b1, c1
     /// - Parent 2 provides: a2, b2, c2
     /// - Possible children: [a1,b1,c2], [a1,b2,c1], [a1,b2,c2], [a2,b1,c1], [a2,b1,c2], [a2,b2,c1]
-    fn recombine(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
+    fn recombine(
+        &self,
+        haplotypes: &mut Vec<Haplotype>,
+        rng: &mut impl Rng,
+        state: &mut AnnealingState,
+    ) {
         let idx1 = rng.gen_range(0..haplotypes.len());
         let mut idx2 = rng.gen_range(0..haplotypes.len());
         let mut attempts = 0;
         const MAX_ATTEMPTS: i32 = 100;
         trace!("Initial recombination pair: indices {} and {}", idx1, idx2);
-        // Try to find compatible haplotypes for recombination
         loop {
             if attempts >= MAX_ATTEMPTS {
                 debug!(
@@ -1453,7 +1538,6 @@ impl HaplotypeEstimationProblem {
                 continue;
             }
             let seq_len = haplotypes[idx1].sequence.len();
-            // Generate multiple unique crossover points and sort them
             let num_points = self.recombination_points.min(seq_len.saturating_sub(1));
             if num_points == 0 {
                 debug!("Sequence too short for recombination");
@@ -1461,7 +1545,7 @@ impl HaplotypeEstimationProblem {
             }
             let mut crossover_points: Vec<usize> = Vec::with_capacity(num_points);
             while crossover_points.len() < num_points {
-                let point = rng.gen_range(1..seq_len); // Start from 1 to ensure meaningful crossover
+                let point = rng.gen_range(1..seq_len);
                 if !crossover_points.contains(&point) {
                     crossover_points.push(point);
                 }
@@ -1471,69 +1555,54 @@ impl HaplotypeEstimationProblem {
                 "Performing multi-point recombination at positions {:?} between haplotypes {} and {}",
                 crossover_points, idx1, idx2
             );
-            // Extract segments from both parents
             let parent1 = &haplotypes[idx1].sequence;
             let parent2 = &haplotypes[idx2].sequence;
             let num_segments = crossover_points.len() + 1;
-            // Build segment boundaries: [0, crossover_points..., seq_len]
             let mut boundaries = Vec::with_capacity(num_segments + 1);
             boundaries.push(0);
             boundaries.extend(&crossover_points);
             boundaries.push(seq_len);
-            // Extract segments from both parents
             let mut segments1: Vec<&[u8]> = Vec::with_capacity(num_segments);
             let mut segments2: Vec<&[u8]> = Vec::with_capacity(num_segments);
             for i in 0..num_segments {
                 segments1.push(&parent1[boundaries[i]..boundaries[i + 1]]);
                 segments2.push(&parent2[boundaries[i]..boundaries[i + 1]]);
             }
-            // Generate all 2^num_segments combinations (each bit decides which parent for that segment)
-            // Skip 0 (all from parent1 = pure parent1) and 2^n-1 (all from parent2 = pure parent2)
-            let num_combinations = 1usize << num_segments; // 2^num_segments
-            let existing_sequences: AHashSet<&[u8]> =
-                haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
+            let num_combinations = 1usize << num_segments;
+            // Use incremental state instead of rebuilding existing_sequences from scratch
             let mut new_sequences: Vec<Vec<u8>> = Vec::new();
             let mut new_sequences_set: AHashSet<Vec<u8>> = AHashSet::new();
             for combo in 1..(num_combinations - 1) {
                 let mut child = Vec::with_capacity(seq_len);
                 for seg_idx in 0..num_segments {
-                    // If bit is set, take from parent2; otherwise from parent1
                     if (combo >> seg_idx) & 1 == 1 {
                         child.extend_from_slice(segments2[seg_idx]);
                     } else {
                         child.extend_from_slice(segments1[seg_idx]);
                     }
                 }
-                if !existing_sequences.contains(child.as_slice())
-                    && !new_sequences_set.contains(&child)
-                {
+                if !state.contains(&child) && !new_sequences_set.contains(&child) {
                     new_sequences_set.insert(child.clone());
                     new_sequences.push(child);
                 }
             }
             debug!("Generated {} new unique sequences", new_sequences.len());
-            // Need at least 1 new sequence to proceed
             if new_sequences.is_empty() {
                 trace!("No new unique sequences generated, retrying with different indices");
                 idx2 = rng.gen_range(0..haplotypes.len());
                 attempts += 1;
                 continue;
             }
-            // Calculate frequency distribution for new haplotypes
             let original_freq1: Vec<f64> = haplotypes[idx1].frequencies.clone();
             let original_freq2: Vec<f64> = haplotypes[idx2].frequencies.clone();
-            // Split parent frequencies among all new children
-            // Each parent contributes half its frequency, distributed among all new children
             let num_new = new_sequences.len();
-            let freq_per_child = 1.0 / (num_new as f64 + 2.0); // +2 for the two parents
-                                                               // Reduce parent frequencies
+            let freq_per_child = 1.0 / (num_new as f64 + 2.0);
             for freq in &mut haplotypes[idx1].frequencies {
                 *freq *= freq_per_child;
             }
             for freq in &mut haplotypes[idx2].frequencies {
                 *freq *= freq_per_child;
             }
-            // Add new haplotypes with combined frequencies
             for new_seq in new_sequences {
                 // Check if this matches a true haplotype
                 let matches = self.check_true_haplotype_match(&new_seq);
@@ -1549,6 +1618,7 @@ impl HaplotypeEstimationProblem {
                     let freq2 = original_freq2.get(s).unwrap_or(&0.0);
                     combined_frequencies[s] = (freq1 + freq2) * freq_per_child;
                 }
+                state.add_haplotype(&new_seq);
                 haplotypes.push(Haplotype {
                     sequence: new_seq,
                     frequencies: combined_frequencies,
@@ -1565,62 +1635,34 @@ impl HaplotypeEstimationProblem {
     /// Picks a random haplotype that carries the most overrepresented nucleotide and
     /// replaces it with the most underrepresented nucleotide. Retries with a new random
     /// position until a unique new haplotype is produced.
-    fn mutate(&self, haplotypes: &mut Vec<Haplotype>, rng: &mut impl Rng) {
+    fn mutate(
+        &self,
+        haplotypes: &mut Vec<Haplotype>,
+        rng: &mut impl Rng,
+        state: &mut AnnealingState,
+    ) {
         let seq_len = haplotypes[0].sequence.len();
         let nucleotides = [b'A', b'C', b'G', b'T'];
-        let existing_sequences: AHashSet<&[u8]> =
-            haplotypes.iter().map(|h| h.sequence.as_slice()).collect();
-        // Compute distance-based weights for position selection.
-        // δ_i = Σ_j (E_ij - O_ij)² where E = haplotype freq, O = read freq
-        let num_haplotypes_f = haplotypes.len() as f64;
-        let position_weights: Vec<f64> = (0..seq_len)
-            .map(|pos| {
-                let mut hap_counts = [0.0f64; 4];
-                for hap in haplotypes.iter() {
-                    match hap.sequence[pos] {
-                        b'A' => hap_counts[0] += 1.0,
-                        b'C' => hap_counts[1] += 1.0,
-                        b'G' => hap_counts[2] += 1.0,
-                        b'T' => hap_counts[3] += 1.0,
-                        _ => {}
-                    }
-                }
-                let reads_freqs = &self.nucleotide_frequencies[pos];
-                (0..4)
-                    .map(|j| {
-                        let hap_freq = hap_counts[j] / num_haplotypes_f;
-                        (hap_freq - reads_freqs[j]).powi(2)
-                    })
-                    .sum::<f64>()
-            })
-            .collect();
-        // Create weighted distribution; fall back to uniform if all weights are zero
+
+        // O(L) via incremental counts instead of O(h × L) full recount
+        let position_weights = state.compute_position_weights(&self.nucleotide_frequencies);
         let pos_dist = WeightedIndex::new(&position_weights)
             .unwrap_or_else(|_| WeightedIndex::new(&vec![1.0; seq_len]).unwrap());
+
         const MAX_ATTEMPTS: usize = 100;
         for _attempt in 0..MAX_ATTEMPTS {
-            // Step 1: Pick a position weighted by per-position squared error distance.
             let pos = pos_dist.sample(rng);
-            // Step 2: Compute nucleotide distribution at this position from the proposed haplotypes.
-            let mut hap_counts = [0.0f64; 4];
-            for hap in haplotypes.iter() {
-                match hap.sequence[pos] {
-                    b'A' => hap_counts[0] += 1.0,
-                    b'C' => hap_counts[1] += 1.0,
-                    b'G' => hap_counts[2] += 1.0,
-                    b'T' => hap_counts[3] += 1.0,
-                    _ => {}
-                }
-            }
-            let num_haplotypes = haplotypes.len() as f64;
+
+            // O(1) lookup from incremental state instead of O(h) recount
+            let hap_counts = state.hap_counts_at(pos);
+            let num_haplotypes = state.num_haplotypes as f64;
             let hap_freqs: [f64; 4] = [
                 hap_counts[0] / num_haplotypes,
                 hap_counts[1] / num_haplotypes,
                 hap_counts[2] / num_haplotypes,
                 hap_counts[3] / num_haplotypes,
             ];
-            // Step 3: Compare with reads distribution at this position.
-            // Find the most overestimated nucleotide (haplotypes have more than reads).
+
             let reads_freqs = &self.nucleotide_frequencies[pos];
             let overestimates: [f64; 4] = [
                 hap_freqs[0] - reads_freqs[0],
@@ -1635,8 +1677,7 @@ impl HaplotypeEstimationProblem {
                 .map(|(idx, _)| idx)
                 .unwrap();
             let over_nuc = nucleotides[over_nuc_idx];
-            // Step 4: Find the most underestimated nucleotide at this position
-            // (reads have more than haplotypes, excluding the overestimated nucleotide).
+
             let underestimates: [f64; 4] = [
                 reads_freqs[0] - hap_freqs[0],
                 reads_freqs[1] - hap_freqs[1],
@@ -1651,7 +1692,7 @@ impl HaplotypeEstimationProblem {
                 .map(|(idx, _)| idx)
                 .unwrap();
             let under_nuc = nucleotides[under_nuc_idx];
-            // Step 5: Pick a random haplotype that carries the overestimated nucleotide at this position.
+
             let candidates: Vec<usize> = (0..haplotypes.len())
                 .filter(|&i| haplotypes[i].sequence[pos] == over_nuc)
                 .collect();
@@ -1661,7 +1702,8 @@ impl HaplotypeEstimationProblem {
             let idx_to_copy = candidates[rng.gen_range(0..candidates.len())];
             let mut new_sequence = haplotypes[idx_to_copy].sequence.clone();
             new_sequence[pos] = under_nuc;
-            if existing_sequences.contains(new_sequence.as_slice()) {
+
+            if state.contains(&new_sequence) {
                 trace!(
                     "Distribution-guided mutation at pos {} ({} -> {}) produced duplicate, skipping",
                     pos,
@@ -1685,6 +1727,7 @@ impl HaplotypeEstimationProblem {
                 *freq /= 2.0;
             }
             let new_freqs = haplotypes[idx_to_copy].frequencies.clone();
+            state.add_haplotype(&new_sequence);
             haplotypes.push(Haplotype {
                 sequence: new_sequence,
                 frequencies: new_freqs,
@@ -1824,10 +1867,11 @@ impl Anneal for HaplotypeEstimationProblem {
             } else {
                 rand::rngs::StdRng::from_entropy()
             };
-            // Apply random operations multiple times to "explode" the haplotype set
+            // Build incremental state once; mutate/recombine update it in O(L) per op
+            let mut annealing_state = AnnealingState::from_haplotypes(&haplotypes);
             let mut operations_applied = 0;
             for op_num in 0..self.operations_per_step {
-                if self.random_operation(&mut haplotypes, &mut rng) {
+                if self.random_operation(&mut haplotypes, &mut rng, &mut annealing_state) {
                     operations_applied += 1;
                     trace!(
                         "Operation {}/{} applied, now have {} haplotypes",

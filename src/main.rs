@@ -994,8 +994,7 @@ impl HaplotypeEstimationProblem {
                     // Directly update frequencies first without updating mismatch_fp
                     for j in 0..num_haps {
                         theta_new[j] = theta_new[j] - 2.0 * alpha * r[j] + alpha * alpha * v[j];
-                        // Parameter projection
-                        theta_new[j] = f64::max(0.01, theta_new[j]);
+                        theta_new[j] = f64::max(1e-10, theta_new[j]);
                     }
                     // Renormalize to the simplex after projection to keep a valid mixture
                     let sum_theta: f64 = theta_new.iter().sum();
@@ -1045,8 +1044,14 @@ impl HaplotypeEstimationProblem {
                     if step_min < 0.0 && alpha == step_min {
                         step_min = mstep * step_min;
                     }
-                    // Check for convergence
-                    if (likelihood_new - likelihood_old).abs() <= self.em_convergence_delta {
+                    // Check for convergence (relative criterion matching normal EM)
+                    let converged = if likelihood_old.abs() > 1e-10 {
+                        (likelihood_new - likelihood_old) / likelihood_old.abs()
+                            < self.em_convergence_delta
+                    } else {
+                        (likelihood_new - likelihood_old) < self.em_convergence_delta
+                    };
+                    if converged {
                         break;
                     }
                 }
@@ -1317,7 +1322,6 @@ impl HaplotypeEstimationProblem {
                 }
             }
         }
-
         let mut interval_list = vec![-1i32; length];
         'outer: for pos1 in 0..length {
             let np1 = nuc_present[pos1];
@@ -1373,7 +1377,6 @@ impl HaplotypeEstimationProblem {
                 }
             }
         }
-
         interval_list.iter().filter(|&&x| x != -1).count()
     }
 
@@ -1850,7 +1853,11 @@ impl Anneal for HaplotypeEstimationProblem {
                 operations_applied,
                 haplotypes.len()
             );
-            self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+            if haplotypes.len() > 30 {
+                self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+            } else {
+                self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+            }
             if !haplotypes.is_empty() {
                 debug!(
                     "Annealing step complete, returning {} haplotypes",

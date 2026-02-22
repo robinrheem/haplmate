@@ -1281,58 +1281,84 @@ impl HaplotypeEstimationProblem {
         if haplotypes.len() <= 1 {
             return 0;
         }
+        let num_haps = haplotypes.len();
         let length = haplotypes[0].sequence.len();
-        // Matrix of possible gamete pairs for ACTG (4x4)
-        let mut gamete_counts = [[0; 4]; 4];
-        // Index is start, value is end of interval
-        let mut interval_list = vec![-1i32; length];
-        // Create rough intervals - list positions with recombinant gamete pairs
-        'outer: for pos1 in 0..length {
-            for pos2 in (pos1 + 1)..length {
-                // Reset gamete counts for this position pair
-                for row in gamete_counts.iter_mut() {
-                    row.fill(0);
-                }
-                // Count gamete pairs at these positions
-                for haplotype in haplotypes {
-                    let nuc1 = haplotype.sequence[pos1];
-                    let nuc2 = haplotype.sequence[pos2];
-                    let (i, j) = match (nuc1, nuc2) {
-                        (b'A', b'A') => (0, 0),
-                        (b'A', b'C') => (0, 1),
-                        (b'A', b'G') => (0, 2),
-                        (b'A', b'T') => (0, 3),
-                        (b'C', b'A') => (1, 0),
-                        (b'C', b'C') => (1, 1),
-                        (b'C', b'G') => (1, 2),
-                        (b'C', b'T') => (1, 3),
-                        (b'G', b'A') => (2, 0),
-                        (b'G', b'C') => (2, 1),
-                        (b'G', b'G') => (2, 2),
-                        (b'G', b'T') => (2, 3),
-                        (b'T', b'A') => (3, 0),
-                        (b'T', b'C') => (3, 1),
-                        (b'T', b'G') => (3, 2),
-                        (b'T', b'T') => (3, 3),
-                        _ => continue, // Skip non-ACGT characters
-                    };
-                    gamete_counts[i][j] = 1;
-                }
-                // Count number of gametes
-                let mut num_gametes = 0;
-                for row in &gamete_counts {
-                    for &count in row {
-                        num_gametes += count;
+        let num_words = (num_haps + 63) / 64;
+        let mask_stride = 4 * num_words;
+        // Precompute bitmasks: for each (position, nucleotide), a bitset of which
+        // haplotypes carry that nucleotide. This turns the per-pair gamete check from
+        // O(numHaps) into O(num_words) ≈ O(1) for typical haplotype counts.
+        let mut masks = vec![0u64; length * mask_stride];
+        for (h, haplotype) in haplotypes.iter().enumerate() {
+            let word = h / 64;
+            let bit = 1u64 << (h % 64);
+            for (pos, &nuc) in haplotype.sequence.iter().enumerate() {
+                let nuc_idx = match nuc {
+                    b'A' => 0usize,
+                    b'C' => 1,
+                    b'G' => 2,
+                    b'T' => 3,
+                    _ => continue,
+                };
+                masks[pos * mask_stride + nuc_idx * num_words + word] |= bit;
+            }
+        }
+        // Precompute which nucleotides are present at each position (4-bit mask)
+        let mut nuc_present = vec![0u8; length];
+        for pos in 0..length {
+            let base = pos * mask_stride;
+            for nuc in 0..4usize {
+                let off = base + nuc * num_words;
+                for w in 0..num_words {
+                    if masks[off + w] != 0 {
+                        nuc_present[pos] |= 1u8 << nuc;
+                        break;
                     }
-                }
-                // If we found 4 gametes, record this interval
-                if num_gametes >= 3 {
-                    interval_list[pos1] = pos2 as i32;
-                    continue 'outer;
                 }
             }
         }
-        // Trim intervals
+
+        let mut interval_list = vec![-1i32; length];
+        'outer: for pos1 in 0..length {
+            let np1 = nuc_present[pos1];
+            let nc1 = np1.count_ones();
+            if nc1 == 0 {
+                continue;
+            }
+            let base1 = pos1 * mask_stride;
+            for pos2 in (pos1 + 1)..length {
+                let np2 = nuc_present[pos2];
+                // Upper bound on distinct gametes is the product of distinct nucleotides
+                if nc1 * np2.count_ones() < 3 {
+                    continue;
+                }
+                let base2 = pos2 * mask_stride;
+                let mut num_gametes = 0u32;
+                for n1 in 0..4usize {
+                    if np1 & (1 << n1) == 0 {
+                        continue;
+                    }
+                    let off1 = base1 + n1 * num_words;
+                    for n2 in 0..4usize {
+                        if np2 & (1 << n2) == 0 {
+                            continue;
+                        }
+                        let off2 = base2 + n2 * num_words;
+                        for w in 0..num_words {
+                            if masks[off1 + w] & masks[off2 + w] != 0 {
+                                num_gametes += 1;
+                                if num_gametes >= 3 {
+                                    interval_list[pos1] = pos2 as i32;
+                                    continue 'outer;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Trim intervals (Hudson & Kaplan 1985)
         for pos1 in 0..length {
             if interval_list[pos1] == -1 {
                 continue;
@@ -1340,18 +1366,14 @@ impl HaplotypeEstimationProblem {
             for pos2 in 0..length {
                 if interval_list[pos2] == -1 || pos2 == pos1 {
                     continue;
-                }
-                // Remove completely overlapped intervals
-                else if pos2 <= pos1 && interval_list[pos1] <= interval_list[pos2] {
+                } else if pos2 <= pos1 && interval_list[pos1] <= interval_list[pos2] {
                     interval_list[pos2] = -1;
-                }
-                // Remove intervals that start within another interval
-                else if pos1 < pos2 && pos2 < interval_list[pos1] as usize {
+                } else if pos1 < pos2 && pos2 < interval_list[pos1] as usize {
                     interval_list[pos2] = -1;
                 }
             }
         }
-        // Count number of remaining intervals/recombinations
+
         interval_list.iter().filter(|&&x| x != -1).count()
     }
 
@@ -1735,7 +1757,9 @@ impl CostFunction for HaplotypeEstimationProblem {
             })
             .sum();
         // Penalty from four gamete test
-        let total_cost = total_cost + self.lambda1 * self.min_recombinations(haplotypes) as f64;
+        let recombinations = self.min_recombinations(haplotypes) as f64;
+        info!("Recombination: {}", recombinations);
+        let total_cost = total_cost + self.lambda1 * recombinations;
         // Penalty for number of haplotypes
         let total_cost = total_cost + self.lambda2 * haplotypes.len() as f64;
         info!("Total cost: {}", total_cost);

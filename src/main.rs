@@ -920,6 +920,7 @@ impl HaplotypeEstimationProblem {
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
+        relative_convergence: bool,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
@@ -1123,7 +1124,12 @@ impl HaplotypeEstimationProblem {
                     if step_min < 0.0 && alpha == step_min {
                         step_min = mstep * step_min;
                     }
-                    let converged = (likelihood_new - likelihood_old).abs() < convergence_delta;
+                    let converged = if relative_convergence && likelihood_old.abs() > 1e-10 {
+                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
+                            < convergence_delta
+                    } else {
+                        (likelihood_new - likelihood_old).abs() < convergence_delta
+                    };
                     if converged {
                         break;
                     }
@@ -1171,6 +1177,7 @@ impl HaplotypeEstimationProblem {
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
+        relative_convergence: bool,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
@@ -1273,7 +1280,12 @@ impl HaplotypeEstimationProblem {
                     }
                     // Calculate new likelihood
                     let likelihood_new = calculate_likelihood(&mismatch_fp_new);
-                    let converged = (likelihood_new - likelihood_old).abs() < convergence_delta;
+                    let converged = if relative_convergence && likelihood_old.abs() > 1e-10 {
+                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
+                            < convergence_delta
+                    } else {
+                        (likelihood_new - likelihood_old).abs() < convergence_delta
+                    };
                     if converged {
                         break;
                     }
@@ -2001,9 +2013,9 @@ impl Anneal for HaplotypeEstimationProblem {
                 haplotypes.len()
             );
             if haplotypes.len() > 30 {
-                self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+                self.square_expectation_maximization(&mut haplotypes, convergence_delta, false)?;
             } else {
-                self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+                self.expectation_maximization(&mut haplotypes, convergence_delta, false)?;
             }
             if !haplotypes.is_empty() {
                 debug!(
@@ -2091,11 +2103,14 @@ fn propose_haplotypes(
         "Running EM optimization on initial {} haplotypes",
         best_haplotypes.len()
     );
-    // Pre-SA EM uses the tight em_cdelta to thoroughly prune the initial large set.
-    // This is a one-time cost that pays off by giving SA a much smaller starting set.
-    if let Err(e) = problem
-        .square_expectation_maximization(&mut best_haplotypes, optimization_parameters.em_cdelta)
-    {
+    // Pre-SA EM uses relative convergence with em_cdelta to properly prune the initial set.
+    // Relative convergence scales naturally with likelihood magnitude, giving enough EM
+    // iterations to concentrate mass without overfitting (which absolute convergence does).
+    if let Err(e) = problem.square_expectation_maximization(
+        &mut best_haplotypes,
+        optimization_parameters.em_cdelta,
+        true,
+    ) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -2189,9 +2204,11 @@ fn propose_haplotypes(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()
     );
-    if let Err(e) = problem
-        .square_expectation_maximization(&mut merged_haplotypes, optimization_parameters.em_cdelta)
-    {
+    if let Err(e) = problem.square_expectation_maximization(
+        &mut merged_haplotypes,
+        optimization_parameters.em_cdelta,
+        true,
+    ) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e

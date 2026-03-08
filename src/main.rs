@@ -1123,13 +1123,7 @@ impl HaplotypeEstimationProblem {
                     if step_min < 0.0 && alpha == step_min {
                         step_min = mstep * step_min;
                     }
-                    // Check for convergence (relative criterion matching normal EM)
-                    let converged = if likelihood_old.abs() > 1e-10 {
-                        (likelihood_new - likelihood_old) / likelihood_old.abs()
-                            < self.em_convergence_delta
-                    } else {
-                        (likelihood_new - likelihood_old) < self.em_convergence_delta
-                    };
+                    let converged = (likelihood_new - likelihood_old).abs() < convergence_delta;
                     if converged {
                         break;
                     }
@@ -1279,15 +1273,7 @@ impl HaplotypeEstimationProblem {
                     }
                     // Calculate new likelihood
                     let likelihood_new = calculate_likelihood(&mismatch_fp_new);
-                    // Check for convergence
-                    let converged = if likelihood_old.abs() > 1e-10 {
-                        // Use relative convergence criterion
-                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
-                            < convergence_delta
-                    } else {
-                        // Use absolute convergence criterion for small likelihoods
-                        (likelihood_new - likelihood_old).abs() < convergence_delta
-                    };
+                    let converged = (likelihood_new - likelihood_old).abs() < convergence_delta;
                     if converged {
                         break;
                     }
@@ -1990,7 +1976,7 @@ fn propose_haplotypes(
     );
     // Calculate EM convergence parameters
     let em_temp_end = 0.00001;
-    let sa_progress = optimization_parameters.sa_max_temperature;
+    let sa_progress = 1.0;
     let convergence_delta =
         em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
     if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)

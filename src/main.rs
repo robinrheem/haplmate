@@ -2103,14 +2103,11 @@ fn propose_haplotypes(
         "Running EM optimization on initial {} haplotypes",
         best_haplotypes.len()
     );
-    // Pre-SA EM uses relative convergence with em_cdelta to properly prune the initial set.
-    // Relative convergence scales naturally with likelihood magnitude, giving enough EM
-    // iterations to concentrate mass without overfitting (which absolute convergence does).
-    if let Err(e) = problem.square_expectation_maximization(
-        &mut best_haplotypes,
-        optimization_parameters.em_cdelta,
-        true,
-    ) {
+    // Pre-SA EM: convergence_delta=0.1 gives tol=0.01 (parameter-space early stopping),
+    // which is the actual mechanism that controls pruning in SQUAREM. Relative convergence
+    // for the likelihood check prevents it from terminating before tol can act.
+    // C code used emTemp=0.1 for initial EM; old Rust code accidentally used 1.8 (bug).
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, 0.1, true) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e

@@ -95,7 +95,7 @@ struct EstimateArgs {
     /// Number of crossover points for recombination (more points = more diversity)
     #[arg(long, default_value = "2")]
     recombination_points: usize,
-    /// Number of recombine/mutate operations per annealing step (more = faster exploration)
+    /// Number of recombine/mutate/read-guided operations per annealing step
     #[arg(long, default_value = "3")]
     operations_per_step: usize,
     /// Path to CSV file containing true haplotypes for debugging/evaluation
@@ -1461,9 +1461,14 @@ impl HaplotypeEstimationProblem {
     ) -> bool {
         let operation: i32 = if haplotypes.len() == 1 {
             debug!("Only one haplotype present, forcing add operation");
-            1
+            // 50/50 between mutate and read-guided when only 1 haplotype
+            if rng.gen_bool(0.5) {
+                1
+            } else {
+                2
+            }
         } else {
-            rng.gen_range(0..2)
+            rng.gen_range(0..3)
         };
         match operation {
             0 if haplotypes.len() >= 2 => {
@@ -1472,8 +1477,13 @@ impl HaplotypeEstimationProblem {
                 true
             }
             1 if haplotypes.len() < self.reads.len() => {
-                debug!("Operation: Add new haplotype by mutation");
+                debug!("Operation: Mutate");
                 self.mutate(haplotypes, rng, state);
+                true
+            }
+            2 if haplotypes.len() < self.reads.len() => {
+                debug!("Operation: Read-guided proposal");
+                self.read_guided_propose(haplotypes, rng, state);
                 true
             }
             _ => {
@@ -1613,6 +1623,112 @@ impl HaplotypeEstimationProblem {
             break;
         }
     }
+    /// Proposes a new haplotype guided by poorly explained reads.
+    ///
+    /// Finds reads that are most mismatched against every current haplotype,
+    /// picks one (weighted by mismatch count), then grafts that read's variants
+    /// onto its closest haplotype to build a candidate. This is a data-driven
+    /// proposal: reads are fragments of true haplotypes, so their variant
+    /// patterns carry real biological signal that random mutation cannot reach.
+    fn read_guided_propose(
+        &self,
+        haplotypes: &mut Vec<Haplotype>,
+        rng: &mut impl Rng,
+        state: &mut AnnealingState,
+    ) {
+        let num_haps = haplotypes.len();
+        // For each read, find its best (min) mismatch count against any haplotype
+        let read_best_mismatches: Vec<u32> = self
+            .reads
+            .iter()
+            .map(|read| {
+                haplotypes
+                    .iter()
+                    .map(|hap| {
+                        let len = read.sequence.len();
+                        let mut mm: u32 = 0;
+                        for i in 0..len {
+                            mm += (read.sequence[i] != hap.sequence[i]) as u32
+                                & read.non_gap_mask[i] as u32;
+                        }
+                        mm
+                    })
+                    .min()
+                    .unwrap_or(u32::MAX)
+            })
+            .collect();
+        // Build weights: reads with more mismatches are more interesting.
+        // Use mismatch^2 to strongly prefer the worst-explained reads.
+        let weights: Vec<f64> = read_best_mismatches
+            .iter()
+            .map(|&mm| (mm as f64) * (mm as f64))
+            .collect();
+        let total_weight: f64 = weights.iter().sum();
+        if total_weight < 1e-12 {
+            debug!("Read-guided: all reads perfectly explained, falling back to mutate");
+            self.mutate(haplotypes, rng, state);
+            return;
+        }
+        const MAX_ATTEMPTS: usize = 50;
+        for _attempt in 0..MAX_ATTEMPTS {
+            // Weighted sample a poorly-explained read
+            let dist = WeightedIndex::new(&weights)
+                .unwrap_or_else(|_| WeightedIndex::new(&vec![1.0; self.reads.len()]).unwrap());
+            let read_idx = dist.sample(rng);
+            let read = &self.reads[read_idx];
+            // Find the closest haplotype to this read (fewest mismatches)
+            let best_hap_idx = (0..num_haps)
+                .min_by_key(|&j| {
+                    let hap = &haplotypes[j];
+                    let len = read.sequence.len();
+                    let mut mm: u32 = 0;
+                    for i in 0..len {
+                        mm += (read.sequence[i] != hap.sequence[i]) as u32
+                            & read.non_gap_mask[i] as u32;
+                    }
+                    mm
+                })
+                .unwrap();
+            // Graft the read's variant positions onto the closest haplotype
+            let mut new_sequence = haplotypes[best_hap_idx].sequence.clone();
+            for i in 0..read.sequence.len() {
+                if read.non_gap_mask[i] == 1 && read.sequence[i] != new_sequence[i] {
+                    new_sequence[i] = read.sequence[i];
+                }
+            }
+            if state.contains(&new_sequence) {
+                trace!("Read-guided proposal produced duplicate, retrying");
+                continue;
+            }
+            let matches = self.check_true_haplotype_match(&new_sequence);
+            if !matches.is_empty() {
+                debug!(
+                    "Read-guided proposal generated true haplotype(s) at CSV index(es): {:?}",
+                    matches
+                );
+            }
+            debug!(
+                "Adding read-guided haplotype (from read {} with {} mismatches to best hap)",
+                read_idx, read_best_mismatches[read_idx]
+            );
+            for freq in &mut haplotypes[best_hap_idx].frequencies {
+                *freq /= 2.0;
+            }
+            let new_freqs = haplotypes[best_hap_idx].frequencies.clone();
+            state.add_haplotype(&new_sequence);
+            haplotypes.push(Haplotype {
+                sequence: new_sequence,
+                frequencies: new_freqs,
+            });
+            return;
+        }
+        debug!(
+            "Read-guided: failed to produce unique haplotype after {} attempts, falling back to mutate",
+            MAX_ATTEMPTS
+        );
+        self.mutate(haplotypes, rng, state);
+    }
+
     /// Applies mutation operation to create a new haplotype
     /// Mutates a haplotype using distribution-guided nucleotide sampling.
     ///

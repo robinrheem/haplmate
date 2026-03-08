@@ -2091,11 +2091,10 @@ fn propose_haplotypes(
         "Running EM optimization on initial {} haplotypes",
         best_haplotypes.len()
     );
-    // EM convergence schedule: starts loose (0.1), tightens to em_cdelta (matching C code).
-    // Pre-SA uses the loosest value to quickly prune the initial large haplotype set.
-    let em_temp_start = 0.1;
-    let convergence_delta = em_temp_start;
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
+    // Pre-SA EM uses the tight em_cdelta to thoroughly prune the initial large set.
+    // This is a one-time cost that pays off by giving SA a much smaller starting set.
+    if let Err(e) = problem
+        .square_expectation_maximization(&mut best_haplotypes, optimization_parameters.em_cdelta)
     {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",

@@ -1838,11 +1838,12 @@ impl Anneal for HaplotypeEstimationProblem {
             debug!("No haplotypes available for annealing operations, returning original set");
             return Ok(param.clone());
         }
-        // Calculate EM convergence parameters
-        let em_temp_end = 0.00001;
+        // EM convergence schedule: starts loose (0.1) at high temperature,
+        // tightens to em_convergence_delta at low temperature (matching C code)
+        let em_temp_start = 0.1;
         let sa_progress = temp / self.sa_max_temperature;
         let convergence_delta =
-            em_temp_end + (self.em_convergence_delta - em_temp_end) * sa_progress;
+            self.em_convergence_delta + (em_temp_start - self.em_convergence_delta) * sa_progress;
         // Retry mechanism: keep trying until we get a non-empty result
         const MAX_RETRIES: usize = 10000;
         for retry_count in 0..=MAX_RETRIES {
@@ -1974,11 +1975,10 @@ fn propose_haplotypes(
         "Running EM optimization on initial {} haplotypes",
         best_haplotypes.len()
     );
-    // Calculate EM convergence parameters
-    let em_temp_end = 0.00001;
-    let sa_progress = 1.0;
-    let convergence_delta =
-        em_temp_end + (optimization_parameters.em_cdelta - em_temp_end) * sa_progress;
+    // EM convergence schedule: starts loose (0.1), tightens to em_cdelta (matching C code).
+    // Pre-SA uses the loosest value to quickly prune the initial large haplotype set.
+    let em_temp_start = 0.1;
+    let convergence_delta = em_temp_start;
     if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, convergence_delta)
     {
         info!(
@@ -2074,8 +2074,8 @@ fn propose_haplotypes(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()
     );
-    if let Err(e) =
-        problem.square_expectation_maximization(&mut merged_haplotypes, convergence_delta)
+    if let Err(e) = problem
+        .square_expectation_maximization(&mut merged_haplotypes, optimization_parameters.em_cdelta)
     {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",

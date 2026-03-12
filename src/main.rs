@@ -37,6 +37,8 @@ enum Command {
     Estimate(EstimateArgs),
     /// Calculate cost for given haplotypes and reads
     Cost(CostArgs),
+    /// Run EM on a given haplotype set and report which haplotypes are removed
+    Em(EmArgs),
 }
 
 #[derive(Debug, Parser, Default)]
@@ -123,6 +125,31 @@ struct CostArgs {
     /// Sequencing error rate
     #[arg(short = 'd', long, default_value = "0.00001")]
     error_rate: f64,
+}
+
+#[derive(Debug, Parser)]
+struct EmArgs {
+    /// Input FASTA file(s) containing reads
+    #[arg(value_name = "FILE")]
+    files: Vec<String>,
+    /// CSV file containing haplotypes to run EM on (same format as output)
+    #[arg(short = 'c', long, required = true)]
+    haplotypes_csv: String,
+    /// Optional CSV file containing true/ground-truth haplotypes for validation
+    #[arg(long)]
+    true_haplotypes_csv: Option<String>,
+    /// Maximum allowed mismatch between haplotypes and reads
+    #[arg(short = 'm', long, default_value = "15")]
+    mismatches: usize,
+    /// Sequencing error rate
+    #[arg(short = 'd', long, default_value = "0.00001")]
+    error_rate: f64,
+    /// Maximum number of EM iterations
+    #[arg(short, long, default_value = "20000")]
+    em_iterations: usize,
+    /// Delta to determine EM convergence
+    #[arg(long, default_value = "0.1")]
+    em_cdelta: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -920,7 +947,6 @@ impl HaplotypeEstimationProblem {
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
-        relative_convergence: bool,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
@@ -1124,13 +1150,7 @@ impl HaplotypeEstimationProblem {
                     if step_min < 0.0 && alpha == step_min {
                         step_min = mstep * step_min;
                     }
-                    let converged = if relative_convergence && likelihood_old.abs() > 1e-10 {
-                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
-                            < convergence_delta
-                    } else {
-                        (likelihood_new - likelihood_old).abs() < convergence_delta
-                    };
-                    if converged {
+                    if (likelihood_new - likelihood_old).abs() < convergence_delta {
                         break;
                     }
                 }
@@ -1177,7 +1197,6 @@ impl HaplotypeEstimationProblem {
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
-        relative_convergence: bool,
     ) -> Result<(), anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
@@ -1280,13 +1299,7 @@ impl HaplotypeEstimationProblem {
                     }
                     // Calculate new likelihood
                     let likelihood_new = calculate_likelihood(&mismatch_fp_new);
-                    let converged = if relative_convergence && likelihood_old.abs() > 1e-10 {
-                        ((likelihood_new - likelihood_old) / likelihood_old.abs()).abs()
-                            < convergence_delta
-                    } else {
-                        (likelihood_new - likelihood_old).abs() < convergence_delta
-                    };
-                    if converged {
+                    if (likelihood_new - likelihood_old).abs() < convergence_delta {
                         break;
                     }
                     // Check for parameter convergence as backup
@@ -2013,9 +2026,9 @@ impl Anneal for HaplotypeEstimationProblem {
                 haplotypes.len()
             );
             if haplotypes.len() > 30 {
-                self.square_expectation_maximization(&mut haplotypes, convergence_delta, false)?;
+                self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
             } else {
-                self.expectation_maximization(&mut haplotypes, convergence_delta, false)?;
+                self.expectation_maximization(&mut haplotypes, convergence_delta)?;
             }
             if !haplotypes.is_empty() {
                 debug!(
@@ -2106,8 +2119,7 @@ fn propose_haplotypes(
     // Pre-SA EM: convergence_delta=2.0 gives tol=0.2 (parameter-space early stopping in
     // SQUAREM). Stops EM before spurious haplotypes stabilize above the 0.5% threshold.
     // Old code accidentally used 1.8 (tol=0.18) which gave ~11 surviving haplotypes.
-    // Relative convergence prevents the likelihood check from interfering with tol.
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, 2.0, true) {
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, 2.0) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -2201,11 +2213,9 @@ fn propose_haplotypes(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()
     );
-    if let Err(e) = problem.square_expectation_maximization(
-        &mut merged_haplotypes,
-        optimization_parameters.em_cdelta,
-        true,
-    ) {
+    if let Err(e) = problem
+        .square_expectation_maximization(&mut merged_haplotypes, optimization_parameters.em_cdelta)
+    {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -2437,6 +2447,205 @@ fn run_cost(mut args: CostArgs) -> Result<()> {
     Ok(())
 }
 
+/// Run the em subcommand
+fn run_em(mut args: EmArgs) -> Result<()> {
+    args.files.sort_by(|a, b| natord::compare(a, b));
+    let unaligned = unaligned_samples(&args.files)?;
+    if !unaligned.is_empty() {
+        unaligned
+            .iter()
+            .for_each(|sample| eprintln!("Sample {sample} is not aligned"));
+        exit(1);
+    }
+    let reads = extract_reads(&args.files);
+    let original_read_length = reads[0].sequence.len();
+    info!("Original read length: {} nucleotides", original_read_length);
+    let (variant_only_reads, invariant_positions) = remove_invariants(&reads);
+    info!(
+        "Read length after removing {} invariant positions: {} nucleotides",
+        invariant_positions.len(),
+        variant_only_reads[0].sequence.len()
+    );
+    let haplotypes = parse_haplotypes_csv(&args.haplotypes_csv, &args.files)?;
+    let invariant_indices: HashSet<usize> =
+        invariant_positions.iter().map(|(pos, _)| *pos).collect();
+    let mut variant_only_haplotypes: Vec<Haplotype> = haplotypes
+        .into_iter()
+        .map(|h| Haplotype {
+            sequence: h
+                .sequence
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !invariant_indices.contains(i))
+                .map(|(_, &b)| b)
+                .collect(),
+            frequencies: h.frequencies,
+        })
+        .collect();
+    // Parse true haplotypes early so we can merge missing ones before EM
+    let true_variant_seqs: Option<Vec<Vec<u8>>> =
+        if let Some(ref true_csv) = args.true_haplotypes_csv {
+            match parse_sequences_from_csv(true_csv) {
+                Ok(sequences) => {
+                    let seqs: Vec<Vec<u8>> = sequences
+                        .into_iter()
+                        .map(|seq| {
+                            seq.iter()
+                                .enumerate()
+                                .filter(|(i, _)| !invariant_indices.contains(i))
+                                .map(|(_, &b)| b)
+                                .collect()
+                        })
+                        .collect();
+                    info!("Loaded {} true haplotypes from {}", seqs.len(), true_csv);
+                    Some(seqs)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to parse true haplotypes CSV: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    // Add missing true haplotypes with random frequencies, then normalize
+    if let Some(ref true_seqs) = true_variant_seqs {
+        let existing: AHashSet<Vec<u8>> = variant_only_haplotypes
+            .iter()
+            .map(|h| h.sequence.clone())
+            .collect();
+        let missing: Vec<&Vec<u8>> = true_seqs
+            .iter()
+            .filter(|seq| !existing.contains(*seq))
+            .collect();
+        let added = missing.len();
+        let num_samples = args.files.len();
+        let mut rng = thread_rng();
+        for seq in missing {
+            let random_freqs: Vec<f64> = (0..num_samples).map(|_| rng.gen::<f64>()).collect();
+            variant_only_haplotypes.push(Haplotype {
+                sequence: seq.clone(),
+                frequencies: random_freqs,
+            });
+        }
+        if added > 0 {
+            // Normalize frequencies per sample so they sum to 1.0
+            for sample_idx in 0..num_samples {
+                let sum: f64 = variant_only_haplotypes
+                    .iter()
+                    .map(|h| h.frequencies[sample_idx])
+                    .sum();
+                if sum > 0.0 {
+                    for h in variant_only_haplotypes.iter_mut() {
+                        h.frequencies[sample_idx] /= sum;
+                    }
+                }
+            }
+            eprintln!(
+                "Added {} missing true haplotypes to input (total now {})",
+                added,
+                variant_only_haplotypes.len()
+            );
+        }
+    }
+    let nucleotide_frequencies = compute_nucleotide_frequencies(&variant_only_reads);
+    let mut reads_by_sample: Vec<Vec<usize>> = vec![Vec::new(); args.files.len()];
+    for (read_idx, read) in variant_only_reads.iter().enumerate() {
+        if let Some(sample_idx) = args.files.iter().position(|s| s == &read.sample) {
+            reads_by_sample[sample_idx].push(read_idx);
+        }
+    }
+    let problem = HaplotypeEstimationProblem::new(
+        args.files.clone(),
+        variant_only_reads.clone(),
+        args.error_rate,
+        0.0001, // lambda1 not critical for standalone EM
+        0.0001, // lambda2 not critical for standalone EM
+        args.mismatches,
+        args.em_iterations,
+        args.em_cdelta,
+        0.0, // sa_max_temperature not used
+        original_read_length,
+        None,
+        reads_by_sample,
+        nucleotide_frequencies,
+        0, // recombination_points not used
+        0, // operations_per_step not used
+        None,
+    );
+    let before_count = variant_only_haplotypes.len();
+    let mut em_haplotypes = variant_only_haplotypes.clone();
+    info!("Running EM on {} haplotypes", before_count);
+    let em_result = if em_haplotypes.len() > 30 {
+        problem.square_expectation_maximization(&mut em_haplotypes, args.em_cdelta)
+    } else {
+        problem.expectation_maximization(&mut em_haplotypes, args.em_cdelta)
+    };
+    if let Err(e) = em_result {
+        eprintln!("EM failed: {}", e);
+        exit(1);
+    }
+    let after_sequences: AHashSet<Vec<u8>> =
+        em_haplotypes.iter().map(|h| h.sequence.clone()).collect();
+    let after_count = em_haplotypes.len();
+    let removed: Vec<&Haplotype> = variant_only_haplotypes
+        .iter()
+        .filter(|h| !after_sequences.contains(&h.sequence))
+        .collect();
+    eprintln!(
+        "EM: {} -> {} haplotypes ({} removed)",
+        before_count,
+        after_count,
+        removed.len()
+    );
+    if !removed.is_empty() {
+        eprintln!("\nRemoved haplotypes:");
+        for hap in &removed {
+            let restored = restore_invariants(&hap.sequence, &invariant_positions);
+            let seq_str = String::from_utf8_lossy(&restored);
+            let freqs: Vec<String> = hap
+                .frequencies
+                .iter()
+                .zip(args.files.iter())
+                .map(|(f, s)| format!("  {}={:.6}", s, f))
+                .collect();
+            eprintln!("  {}{}", seq_str, freqs.join(""));
+        }
+    }
+    // Surviving haplotypes to stdout in CSV format
+    let output = haplotype_frequencies_output(&em_haplotypes, &invariant_positions, &args.files);
+    print!("{}", output);
+    // True haplotype survival report
+    if let Some(ref true_seqs) = true_variant_seqs {
+        let mut true_removed = Vec::new();
+        let mut true_kept = Vec::new();
+        for seq in true_seqs {
+            if after_sequences.contains(seq) {
+                true_kept.push(seq);
+            } else {
+                true_removed.push(seq);
+            }
+        }
+        eprintln!(
+            "\nTrue haplotypes: {} total, {} kept, {} removed by EM",
+            true_seqs.len(),
+            true_kept.len(),
+            true_removed.len()
+        );
+        if !true_removed.is_empty() {
+            eprintln!("\nWARNING: EM removed the following TRUE haplotypes:");
+            for seq in &true_removed {
+                let restored = restore_invariants(seq, &invariant_positions);
+                eprintln!("  {}", String::from_utf8_lossy(&restored));
+            }
+            exit(1);
+        } else {
+            eprintln!("OK: All true haplotypes survived EM");
+        }
+    }
+    Ok(())
+}
+
 /// Main function
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -2452,6 +2661,7 @@ fn main() -> Result<()> {
     match args.command {
         Some(Command::Estimate(estimate_args)) => run_estimate(estimate_args),
         Some(Command::Cost(cost_args)) => run_cost(cost_args),
+        Some(Command::Em(em_args)) => run_em(em_args),
         None => {
             // Default behavior: run estimate with flattened args
             run_estimate(args.estimate)

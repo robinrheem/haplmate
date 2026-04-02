@@ -7,7 +7,6 @@ use rand::prelude::*;
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use seq_io::fasta::{Reader, Record};
-use statrs::distribution::{Binomial, Discrete};
 use std::collections::HashSet;
 use std::process::exit;
 use tracing::{debug, info, trace};
@@ -702,7 +701,7 @@ struct HaplotypeEstimationProblem {
     seed: Option<u64>,
     // Pre-indexed reads by sample: reads_by_sample[sample_idx] = vec of read indices
     reads_by_sample: Vec<Vec<usize>>,
-    // Pre-computed binomial PMF lookup table: mismatch_prob_table[num_mismatches] = probability
+    // Pre-computed positional likelihood table: mismatch_prob_table[k] = e^k * (1-e)^(n-k)
     mismatch_prob_table: Vec<f64>,
     // Per-position nucleotide frequencies [A, C, G, T] for MAF-based mutation
     nucleotide_frequencies: Vec<[f64; 4]>,
@@ -812,16 +811,17 @@ impl HaplotypeEstimationProblem {
         operations_per_step: usize,
         true_haplotype_sequences: Option<Vec<Vec<u8>>>,
     ) -> Self {
-        // Pre-compute binomial PMF lookup table (like legacy C code's initialize_Mismatch)
-        let mismatch_prob_table = match Binomial::new(error_rate, original_read_length as u64) {
-            Ok(binomial) => (0..=em_max_mismatches)
-                .map(|m| binomial.pmf(m as u64))
-                .collect(),
-            Err(_) => {
-                eprintln!("Failed to create binomial distribution");
-                vec![0.0; em_max_mismatches + 1]
-            }
-        };
+        // Pre-compute positional likelihood table: e^k * (1-e)^(n-k) for k mismatches
+        let mismatch_prob_table: Vec<f64> = (0..=em_max_mismatches)
+            .map(|m| {
+                if m >= original_read_length {
+                    0.0
+                } else {
+                    error_rate.powi(m as i32)
+                        * (1.0 - error_rate).powi((original_read_length - m) as i32)
+                }
+            })
+            .collect();
         Self {
             samples,
             reads,
@@ -1901,7 +1901,7 @@ impl CostFunction for HaplotypeEstimationProblem {
     /// # Implementation Details
     ///
     /// - Ignores gap positions ('-') when counting mismatches
-    /// - Uses binomial probability model for mismatches
+    /// - Uses positional likelihood model for mismatches: e^k * (1-e)^(n-k)
     /// - Only considers haplotypes from matching sample when calculating read probabilities
     /// - Higher costs indicate worse solutions
     fn cost(&self, haplotypes: &Self::Param) -> std::result::Result<Self::Output, anyhow::Error> {

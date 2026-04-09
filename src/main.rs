@@ -1455,7 +1455,7 @@ impl HaplotypeEstimationProblem {
                         for w in 0..num_words {
                             if masks[off1 + w] & masks[off2 + w] != 0 {
                                 num_gametes += 1;
-                                if num_gametes >= 3 {
+                                if num_gametes > 3 {
                                     interval_list[pos1] = pos2 as i32;
                                     continue 'outer;
                                 }

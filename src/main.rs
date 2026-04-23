@@ -1,5 +1,5 @@
 use ahash::{AHashMap, AHashSet};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use argmin::core::{CostFunction, Executor};
 use argmin::solver::simulatedannealing::{Anneal, SATempFunc, SimulatedAnnealing};
 use rand::distributions::WeightedIndex;
@@ -134,6 +134,12 @@ struct EmArgs {
     /// CSV file containing haplotypes to run EM on (same format as output)
     #[arg(short = 'c', long, required = true)]
     haplotypes_csv: String,
+    /// Write post-EM haplotype frequencies CSV (same format as estimate output)
+    #[arg(short, long, default_value = "em_haplotypes.csv")]
+    output: Option<String>,
+    /// Write per-sample EM log-likelihood trace CSV
+    #[arg(long, default_value = "em_log_likelihood.csv")]
+    likelihood_output: Option<String>,
     /// Optional CSV file containing true/ground-truth haplotypes for validation
     #[arg(long)]
     true_haplotypes_csv: Option<String>,
@@ -2604,12 +2610,18 @@ fn run_em(mut args: EmArgs) -> Result<()> {
     };
     eprintln!("EM_LIKELIHOOD_START");
     eprintln!("sample,iteration,log_likelihood");
+    let mut likelihood_csv = String::from("sample,iteration,log_likelihood\n");
     for (sample, trace) in &likelihood_traces {
         for (iter, ll) in trace.iter().enumerate() {
             eprintln!("{},{},{}", sample, iter, ll);
+            likelihood_csv.push_str(&format!("{},{},{}\n", sample, iter, ll));
         }
     }
     eprintln!("EM_LIKELIHOOD_END");
+    if let Some(ref path) = args.likelihood_output {
+        std::fs::write(path, likelihood_csv.as_str())
+            .with_context(|| format!("write EM log-likelihood CSV to {path}"))?;
+    }
     let after_sequences: AHashSet<Vec<u8>> =
         em_haplotypes.iter().map(|h| h.sequence.clone()).collect();
     let after_count = em_haplotypes.len();
@@ -2640,6 +2652,10 @@ fn run_em(mut args: EmArgs) -> Result<()> {
     // Surviving haplotypes to stdout in CSV format
     let output = haplotype_frequencies_output(&em_haplotypes, &invariant_positions, &args.files);
     print!("{}", output);
+    if let Some(ref path) = args.output {
+        std::fs::write(path, output.as_str())
+            .with_context(|| format!("write post-EM haplotypes CSV to {path}"))?;
+    }
     // True haplotype survival report
     if let Some(ref true_seqs) = true_variant_seqs {
         let mut true_removed = Vec::new();

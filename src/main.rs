@@ -140,6 +140,13 @@ struct EmArgs {
     /// Write per-sample EM log-likelihood trace CSV
     #[arg(long, default_value = "em_log_likelihood.csv")]
     likelihood_output: Option<String>,
+    /// Write per-sample, per-iteration true-haplotype frequency trace CSV.
+    /// Long format: `sample,iteration,haplotype,frequency`, where `haplotype` is
+    /// `true_hap_<i>` (matching the row order in --true-haplotypes-csv) plus a
+    /// special `sum` row that is the sum of all true-haplotype frequencies at that
+    /// iteration. Only written when --true-haplotypes-csv is provided.
+    #[arg(long, default_value = "em_true_haplotype_trace.csv")]
+    true_haplotype_trace_output: Option<String>,
     /// Optional CSV file containing true/ground-truth haplotypes for validation
     #[arg(long)]
     true_haplotypes_csv: Option<String>,
@@ -170,6 +177,18 @@ struct Read {
 struct Haplotype {
     sequence: Vec<u8>,
     frequencies: Vec<f64>,
+}
+
+/// Per-sample diagnostic traces emitted by the EM routines.
+#[derive(Debug, Default)]
+struct EmTraceResult {
+    /// `(sample_name, log_likelihood_per_iteration)` — index 0 holds the initial likelihood,
+    /// followed by one entry per completed outer EM iteration.
+    likelihoods: Vec<(String, Vec<f64>)>,
+    /// `(sample_name, frequencies_per_iteration)` for the haplotypes the caller asked to track.
+    /// Each inner `Vec<f64>` has the same length and ordering as `track_haplotype_indices`.
+    /// Empty per-sample traces when the caller did not request tracking.
+    frequencies: Vec<(String, Vec<Vec<f64>>)>,
 }
 
 #[derive(Debug)]
@@ -953,12 +972,15 @@ impl HaplotypeEstimationProblem {
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
-    ) -> Result<Vec<(String, Vec<f64>)>, anyhow::Error> {
+        track_haplotype_indices: Option<&[usize]>,
+    ) -> Result<EmTraceResult, anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
+        let track = track_haplotype_indices;
         // Process all samples in parallel - each sample is completely independent
-        // Collect frequency results and likelihood traces per sample
-        let sample_results: Vec<(Vec<f64>, Vec<f64>)> = self
+        // Collect frequency results, likelihood traces, and (optional) tracked-frequency traces
+        // per sample
+        let sample_results: Vec<(Vec<f64>, Vec<f64>, Vec<Vec<f64>>)> = self
             .samples
             .par_iter()
             .enumerate()
@@ -966,7 +988,12 @@ impl HaplotypeEstimationProblem {
                 let sample_read_indices = &self.reads_by_sample[sample_idx];
                 let num_reads = sample_read_indices.len();
                 if num_haps == 1 {
-                    return (vec![1.0], vec![]);
+                    let theta_trace = if let Some(idxs) = track {
+                        vec![idxs.iter().map(|_| 1.0).collect()]
+                    } else {
+                        Vec::new()
+                    };
+                    return (vec![1.0], vec![], theta_trace);
                 }
                 // Initialize theta from current haplotype frequencies (read-only)
                 let mut theta_new: Vec<f64> = haplotypes
@@ -1065,6 +1092,10 @@ impl HaplotypeEstimationProblem {
                 let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
                 let mut likelihood_new = likelihood_old;
                 let mut likelihood_trace = vec![likelihood_old];
+                let mut theta_trace: Vec<Vec<f64>> = Vec::new();
+                if let Some(idxs) = track {
+                    theta_trace.push(idxs.iter().map(|&i| theta_new[i]).collect());
+                }
                 let mut iters = 0;
                 // Main EM loop
                 while iters < self.em_iterations {
@@ -1158,16 +1189,19 @@ impl HaplotypeEstimationProblem {
                         step_min = mstep * step_min;
                     }
                     likelihood_trace.push(likelihood_new);
+                    if let Some(idxs) = track {
+                        theta_trace.push(idxs.iter().map(|&i| theta_new[i]).collect());
+                    }
                     if (likelihood_new - likelihood_old).abs() < convergence_delta {
                         break;
                     }
                 }
-                (theta_new, likelihood_trace)
+                (theta_new, likelihood_trace, theta_trace)
             })
             .collect();
 
         // Write back all frequencies sequentially (no contention, safe)
-        for (sample_idx, (freqs, _)) in sample_results.iter().enumerate() {
+        for (sample_idx, (freqs, _, _)) in sample_results.iter().enumerate() {
             for (hap_idx, haplotype) in haplotypes.iter_mut().enumerate() {
                 haplotype.frequencies[sample_idx] = freqs[hap_idx];
             }
@@ -1197,25 +1231,33 @@ impl HaplotypeEstimationProblem {
                 }
             }
         }
-        let likelihood_traces: Vec<(String, Vec<f64>)> = self
-            .samples
-            .iter()
-            .zip(sample_results.into_iter())
-            .map(|(name, (_, trace))| (name.clone(), trace))
-            .collect();
-        Ok(likelihood_traces)
+        let mut likelihoods: Vec<(String, Vec<f64>)> = Vec::with_capacity(self.samples.len());
+        let mut frequencies: Vec<(String, Vec<Vec<f64>>)> = Vec::with_capacity(self.samples.len());
+        for (name, (_, ll_trace, theta_trace)) in
+            self.samples.iter().zip(sample_results.into_iter())
+        {
+            likelihoods.push((name.clone(), ll_trace));
+            frequencies.push((name.clone(), theta_trace));
+        }
+        Ok(EmTraceResult {
+            likelihoods,
+            frequencies,
+        })
     }
 
     fn expectation_maximization(
         &self,
         haplotypes: &mut Vec<Haplotype>,
         convergence_delta: f64,
-    ) -> Result<Vec<(String, Vec<f64>)>, anyhow::Error> {
+        track_haplotype_indices: Option<&[usize]>,
+    ) -> Result<EmTraceResult, anyhow::Error> {
         let num_haps = haplotypes.len();
         let mismatch_matrix = self.compute_mismatch_matrix(haplotypes);
+        let track = track_haplotype_indices;
         // Process all samples in parallel - each sample is completely independent
-        // Collect frequency results and likelihood traces per sample
-        let sample_results: Vec<(Vec<f64>, Vec<f64>)> = self
+        // Collect frequency results, likelihood traces, and (optional) tracked-frequency traces
+        // per sample
+        let sample_results: Vec<(Vec<f64>, Vec<f64>, Vec<Vec<f64>>)> = self
             .samples
             .par_iter()
             .enumerate()
@@ -1234,7 +1276,12 @@ impl HaplotypeEstimationProblem {
                     likelihood
                 };
                 if num_haps == 1 {
-                    return (vec![1.0], vec![]);
+                    let theta_trace = if let Some(idxs) = track {
+                        vec![idxs.iter().map(|_| 1.0).collect()]
+                    } else {
+                        Vec::new()
+                    };
+                    return (vec![1.0], vec![], theta_trace);
                 }
                 // Initialize frequencies uniformly if not already set
                 let mut theta: Vec<f64> = haplotypes
@@ -1265,6 +1312,10 @@ impl HaplotypeEstimationProblem {
                 // Calculate initial likelihood
                 let mut likelihood_old = calculate_likelihood(&mismatch_fp_new);
                 let mut likelihood_trace = vec![likelihood_old];
+                let mut theta_trace: Vec<Vec<f64>> = Vec::new();
+                if let Some(idxs) = track {
+                    theta_trace.push(idxs.iter().map(|&i| theta[i]).collect());
+                }
                 let mut iters = 0;
                 // Hoist memberships allocation to avoid re-allocation in every EM iteration
                 let mut memberships = vec![0.0; num_reads * num_haps];
@@ -1314,6 +1365,9 @@ impl HaplotypeEstimationProblem {
                     // Calculate new likelihood
                     let likelihood_new = calculate_likelihood(&mismatch_fp_new);
                     likelihood_trace.push(likelihood_new);
+                    if let Some(idxs) = track {
+                        theta_trace.push(idxs.iter().map(|&i| theta[i]).collect());
+                    }
                     if (likelihood_new - likelihood_old).abs() < convergence_delta {
                         break;
                     }
@@ -1329,11 +1383,11 @@ impl HaplotypeEstimationProblem {
                     likelihood_old = likelihood_new;
                     iters += 1;
                 }
-                (theta, likelihood_trace)
+                (theta, likelihood_trace, theta_trace)
             })
             .collect();
         // Write back all frequencies sequentially (no contention, safe)
-        for (sample_idx, (freqs, _)) in sample_results.iter().enumerate() {
+        for (sample_idx, (freqs, _, _)) in sample_results.iter().enumerate() {
             for (hap_idx, haplotype) in haplotypes.iter_mut().enumerate() {
                 haplotype.frequencies[sample_idx] = freqs[hap_idx];
             }
@@ -1362,13 +1416,18 @@ impl HaplotypeEstimationProblem {
                 }
             }
         }
-        let likelihood_traces: Vec<(String, Vec<f64>)> = self
-            .samples
-            .iter()
-            .zip(sample_results.into_iter())
-            .map(|(name, (_, trace))| (name.clone(), trace))
-            .collect();
-        Ok(likelihood_traces)
+        let mut likelihoods: Vec<(String, Vec<f64>)> = Vec::with_capacity(self.samples.len());
+        let mut frequencies: Vec<(String, Vec<Vec<f64>>)> = Vec::with_capacity(self.samples.len());
+        for (name, (_, ll_trace, theta_trace)) in
+            self.samples.iter().zip(sample_results.into_iter())
+        {
+            likelihoods.push((name.clone(), ll_trace));
+            frequencies.push((name.clone(), theta_trace));
+        }
+        Ok(EmTraceResult {
+            likelihoods,
+            frequencies,
+        })
     }
 
     /// Calculates the minimum number of recombination events required to explain the given set of haplotypes
@@ -2046,9 +2105,9 @@ impl Anneal for HaplotypeEstimationProblem {
                 haplotypes.len()
             );
             if haplotypes.len() > 30 {
-                self.square_expectation_maximization(&mut haplotypes, convergence_delta)?;
+                self.square_expectation_maximization(&mut haplotypes, convergence_delta, None)?;
             } else {
-                self.expectation_maximization(&mut haplotypes, convergence_delta)?;
+                self.expectation_maximization(&mut haplotypes, convergence_delta, None)?;
             }
             if !haplotypes.is_empty() {
                 debug!(
@@ -2139,7 +2198,7 @@ fn propose_haplotypes(
     // Pre-SA EM: convergence_delta=2.0 gives tol=0.2 (parameter-space early stopping in
     // SQUAREM). Stops EM before spurious haplotypes stabilize above the 0.5% threshold.
     // Old code accidentally used 1.8 (tol=0.18) which gave ~11 surviving haplotypes.
-    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, 2.0) {
+    if let Err(e) = problem.square_expectation_maximization(&mut best_haplotypes, 2.0, None) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -2233,9 +2292,11 @@ fn propose_haplotypes(
         "Running final SA pass on {} merged haplotypes",
         merged_haplotypes.len()
     );
-    if let Err(e) = problem
-        .square_expectation_maximization(&mut merged_haplotypes, optimization_parameters.em_cdelta)
-    {
+    if let Err(e) = problem.square_expectation_maximization(
+        &mut merged_haplotypes,
+        optimization_parameters.em_cdelta,
+        None,
+    ) {
         info!(
             "EM optimization failed: {}, proceeding with unoptimized haplotypes",
             e
@@ -2596,22 +2657,45 @@ fn run_em(mut args: EmArgs) -> Result<()> {
     let before_count = variant_only_haplotypes.len();
     let mut em_haplotypes = variant_only_haplotypes.clone();
     info!("Running EM on {} haplotypes", before_count);
-    let likelihood_traces = if em_haplotypes.len() > 30 {
-        problem.square_expectation_maximization(&mut em_haplotypes, args.em_cdelta)
+    // Map each true haplotype (in CSV order) to its index inside `em_haplotypes`.
+    // `em_haplotypes` is a clone of `variant_only_haplotypes` *after* missing true
+    // haplotypes were merged in, so every true sequence must be findable here.
+    let track_indices: Option<Vec<usize>> = true_variant_seqs.as_ref().map(|true_seqs| {
+        true_seqs
+            .iter()
+            .map(|seq| {
+                em_haplotypes
+                    .iter()
+                    .position(|h| &h.sequence == seq)
+                    .expect("true haplotype should be present in em_haplotypes after merge")
+            })
+            .collect()
+    });
+    let em_result = if em_haplotypes.len() > 30 {
+        problem.square_expectation_maximization(
+            &mut em_haplotypes,
+            args.em_cdelta,
+            track_indices.as_deref(),
+        )
     } else {
-        problem.expectation_maximization(&mut em_haplotypes, args.em_cdelta)
+        problem.expectation_maximization(
+            &mut em_haplotypes,
+            args.em_cdelta,
+            track_indices.as_deref(),
+        )
     };
-    let likelihood_traces = match likelihood_traces {
+    let em_result = match em_result {
         Ok(traces) => traces,
         Err(e) => {
             eprintln!("EM failed: {}", e);
             exit(1);
         }
     };
+    let likelihood_traces = &em_result.likelihoods;
     eprintln!("EM_LIKELIHOOD_START");
     eprintln!("sample,iteration,log_likelihood");
     let mut likelihood_csv = String::from("sample,iteration,log_likelihood\n");
-    for (sample, trace) in &likelihood_traces {
+    for (sample, trace) in likelihood_traces {
         for (iter, ll) in trace.iter().enumerate() {
             eprintln!("{},{},{}", sample, iter, ll);
             likelihood_csv.push_str(&format!("{},{},{}\n", sample, iter, ll));
@@ -2621,6 +2705,31 @@ fn run_em(mut args: EmArgs) -> Result<()> {
     if let Some(ref path) = args.likelihood_output {
         std::fs::write(path, likelihood_csv.as_str())
             .with_context(|| format!("write EM log-likelihood CSV to {path}"))?;
+    }
+    // Emit per-iteration true-haplotype frequency trace, including a `sum` row that is
+    // the sum of all true-haplotype frequencies at that iteration. Only written when the
+    // user supplied --true-haplotypes-csv.
+    if track_indices.is_some() {
+        if let Some(ref path) = args.true_haplotype_trace_output {
+            let mut trace_csv = String::from("sample,iteration,haplotype,frequency\n");
+            for (sample, freq_trace) in &em_result.frequencies {
+                for (iter, per_iter) in freq_trace.iter().enumerate() {
+                    let mut sum = 0.0;
+                    for (true_idx, &freq) in per_iter.iter().enumerate() {
+                        trace_csv.push_str(&format!(
+                            "{},{},true_hap_{},{}\n",
+                            sample, iter, true_idx, freq
+                        ));
+                        sum += freq;
+                    }
+                    trace_csv.push_str(&format!("{},{},sum,{}\n", sample, iter, sum));
+                }
+            }
+            std::fs::write(path, trace_csv.as_str()).with_context(|| {
+                format!("write EM true-haplotype frequency trace CSV to {path}")
+            })?;
+            eprintln!("Wrote true-haplotype frequency trace to {}", path);
+        }
     }
     let after_sequences: AHashSet<Vec<u8>> =
         em_haplotypes.iter().map(|h| h.sequence.clone()).collect();

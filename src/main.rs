@@ -144,9 +144,15 @@ struct EmArgs {
     /// Long format: `sample,iteration,haplotype,frequency`, where `haplotype` is
     /// `true_hap_<i>` (matching the row order in --true-haplotypes-csv) plus a
     /// special `sum` row that is the sum of all true-haplotype frequencies at that
-    /// iteration. Only written when --true-haplotypes-csv is provided.
-    #[arg(long, default_value = "em_true_haplotype_trace.csv")]
-    true_haplotype_trace_output: Option<String>,
+    /// iteration. Only populated when --true-haplotypes-csv is provided; otherwise
+    /// the file is still written with just the header so it's obvious where the
+    /// output went.
+    #[arg(
+        long,
+        alias = "true-haplotype-trace-output",
+        default_value = "em_true_haplotypes_trace.csv"
+    )]
+    true_haplotypes_trace_output: Option<String>,
     /// Optional CSV file containing true/ground-truth haplotypes for validation
     #[arg(long)]
     true_haplotypes_csv: Option<String>,
@@ -2706,13 +2712,18 @@ fn run_em(mut args: EmArgs) -> Result<()> {
         std::fs::write(path, likelihood_csv.as_str())
             .with_context(|| format!("write EM log-likelihood CSV to {path}"))?;
     }
-    // Emit per-iteration true-haplotype frequency trace, including a `sum` row that is
-    // the sum of all true-haplotype frequencies at that iteration. Only written when the
-    // user supplied --true-haplotypes-csv.
-    if track_indices.is_some() {
-        if let Some(ref path) = args.true_haplotype_trace_output {
-            let mut trace_csv = String::from("sample,iteration,haplotype,frequency\n");
+    // Emit per-iteration true-haplotype frequency trace, including a `sum` row that
+    // is the sum of all true-haplotype frequencies at that iteration. We *always*
+    // write the file when the flag is set (with at least the header row) so it's
+    // never ambiguous whether the option was honored. The body is only populated
+    // when --true-haplotypes-csv is also provided.
+    if let Some(ref path) = args.true_haplotypes_trace_output {
+        let mut trace_csv = String::from("sample,iteration,haplotype,frequency\n");
+        let mut total_rows = 0usize;
+        let mut total_iterations = 0usize;
+        if track_indices.is_some() {
             for (sample, freq_trace) in &em_result.frequencies {
+                total_iterations += freq_trace.len();
                 for (iter, per_iter) in freq_trace.iter().enumerate() {
                     let mut sum = 0.0;
                     for (true_idx, &freq) in per_iter.iter().enumerate() {
@@ -2721,14 +2732,41 @@ fn run_em(mut args: EmArgs) -> Result<()> {
                             sample, iter, true_idx, freq
                         ));
                         sum += freq;
+                        total_rows += 1;
                     }
                     trace_csv.push_str(&format!("{},{},sum,{}\n", sample, iter, sum));
+                    total_rows += 1;
                 }
             }
-            std::fs::write(path, trace_csv.as_str()).with_context(|| {
-                format!("write EM true-haplotype frequency trace CSV to {path}")
-            })?;
-            eprintln!("Wrote true-haplotype frequency trace to {}", path);
+        }
+        std::fs::write(path, trace_csv.as_str())
+            .with_context(|| format!("write EM true-haplotype frequency trace CSV to {path}"))?;
+        let abs_path = std::fs::canonicalize(path)
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| path.to_string());
+        match &track_indices {
+            Some(idxs) if !idxs.is_empty() => eprintln!(
+                "Wrote true-haplotype frequency trace to {} ({} row(s); {} true \
+                 haplotype(s) tracked across {} sample(s), {} total iterations)",
+                abs_path,
+                total_rows,
+                idxs.len(),
+                em_result.frequencies.len(),
+                total_iterations
+            ),
+            Some(_) => eprintln!(
+                "Wrote header-only true-haplotype frequency trace to {}: the supplied \
+                 --true-haplotypes-csv yielded zero true haplotypes after parsing \
+                 (check the CSV format / header row)",
+                abs_path
+            ),
+            None => eprintln!(
+                "Wrote header-only true-haplotype frequency trace to {}: \
+                 --true-haplotypes-csv was not provided, so no true haplotypes \
+                 were tracked",
+                abs_path
+            ),
         }
     }
     let after_sequences: AHashSet<Vec<u8>> =

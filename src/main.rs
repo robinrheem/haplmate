@@ -9,6 +9,7 @@ use rayon::prelude::*;
 use seq_io::fasta::{Reader, Record};
 use std::collections::HashSet;
 use std::process::exit;
+use std::time::Instant;
 use tracing::{debug, info, trace};
 use tracing_subscriber;
 
@@ -2677,7 +2678,9 @@ fn run_em(mut args: EmArgs) -> Result<()> {
             })
             .collect()
     });
-    let em_result = if em_haplotypes.len() > 30 {
+    let used_squarem = em_haplotypes.len() > 30;
+    let em_start = Instant::now();
+    let em_result = if used_squarem {
         problem.square_expectation_maximization(
             &mut em_haplotypes,
             args.em_cdelta,
@@ -2697,6 +2700,17 @@ fn run_em(mut args: EmArgs) -> Result<()> {
             exit(1);
         }
     };
+    let em_elapsed = em_start.elapsed();
+    info!(
+        "EM ({}) completed in {:.3?} on {} haplotypes",
+        if used_squarem {
+            "square_expectation_maximization"
+        } else {
+            "expectation_maximization"
+        },
+        em_elapsed,
+        before_count
+    );
     let likelihood_traces = &em_result.likelihoods;
     eprintln!("EM_LIKELIHOOD_START");
     eprintln!("sample,iteration,log_likelihood");

@@ -1002,21 +1002,8 @@ impl HaplotypeEstimationProblem {
                     };
                     return (vec![1.0], vec![], theta_trace);
                 }
-                // Initialize theta from current haplotype frequencies (read-only)
-                let mut theta_new: Vec<f64> = haplotypes
-                    .iter()
-                    .map(|hap| {
-                        let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                        f64::max(1e-10, f)
-                    })
-                    .collect();
-                // Normalize initial frequencies to sum to 1.0
-                let sum: f64 = theta_new.iter().sum();
-                if sum > 0.0 {
-                    for val in theta_new.iter_mut() {
-                        *val /= sum;
-                    }
-                }
+                // TEST: uniform init instead of reusing haplotype.frequencies
+                let mut theta_new: Vec<f64> = vec![1.0 / num_haps as f64; num_haps];
                 let mismatches: Vec<&[f64]> = sample_read_indices
                     .iter()
                     .map(|&read_idx| {
@@ -1290,21 +1277,8 @@ impl HaplotypeEstimationProblem {
                     };
                     return (vec![1.0], vec![], theta_trace);
                 }
-                // Initialize frequencies uniformly if not already set
-                let mut theta: Vec<f64> = haplotypes
-                    .iter()
-                    .map(|hap| {
-                        let f = *hap.frequencies.get(sample_idx).unwrap_or(&0.0);
-                        f64::max(1e-10, f)
-                    })
-                    .collect();
-                // Normalize initial frequencies to sum to 1.0
-                let sum: f64 = theta.iter().sum();
-                if sum > 0.0 {
-                    for val in theta.iter_mut() {
-                        *val /= sum;
-                    }
-                }
+                // TEST: uniform init instead of reusing haplotype.frequencies
+                let mut theta: Vec<f64> = vec![1.0 / num_haps as f64; num_haps];
                 let mismatches: Vec<&[f64]> = sample_read_indices
                     .iter()
                     .map(|&read_idx| {
